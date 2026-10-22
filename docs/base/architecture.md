@@ -2,6 +2,26 @@
 
 This document describes the currently implemented research infrastructure.
 
+## Design Boundary
+
+KV-Base is the reusable algorithm and phenomenon-exploration layer. It should
+make observation and intervention easy without requiring every research idea
+to use the same internal implementation. A downstream project may change
+attention, cache layout, or model-specific code when necessary.
+
+The two supported conceptual modes are:
+
+```text
+Observe:
+  model execution -> KVObserver -> KVRecorder / analysis
+
+Intervene:
+  model execution -> Press / policy -> modified KV state -> evaluation
+```
+
+The modes may be combined. The base does not claim production serving,
+physical sparse execution, or hardware savings from logical KV reduction alone.
+
 ## Runtime Path
 
 ```text
@@ -128,3 +148,16 @@ what to record.
 - Gathered cache indices do not automatically preserve original token IDs.
 - Quantized-cache support uses the current Transformers/KVPress cache path and
   may depend on private cache fields.
+
+## Downstream Workflow
+
+Start a research branch from the frozen base version. First classify the work
+as observation, Prefill intervention, Decode intervention, or a combination.
+Reuse `KVContext`, `KVObserver`, `KVRecorder`, `pipeline.py`, `utils.py`, and
+the common Press interfaces before modifying shared code.
+
+Move a change back into KV-Base only when multiple research directions need
+the same capability, such as lifecycle metadata, a generic observer hook, a
+recording improvement, or a reusable cache utility. Keep paper-specific
+scoring rules, one-off analysis, model workarounds, and specialized kernels in
+the downstream project.

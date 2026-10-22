@@ -1,560 +1,183 @@
 # KV-Base Project Instructions
 
-## 1. Project purpose
+## 1. Purpose and Scope
 
-This repository is a research-oriented KV Cache base framework derived from NVIDIA KVPress.
+KV-Base is a research-oriented KV Cache framework derived from NVIDIA
+KVPress. Its purpose is rapid prototyping of KV Cache research ideas while
+reusing common model loading, generation, cache access, Prefill/Decode
+lifecycle, tracing, recording, and evaluation infrastructure.
 
-The primary goal is **rapid prototyping of new KV Cache research ideas**. A new idea should be able to clone or branch from this base repository and reuse the common infrastructure for model loading, generation, KV Cache access, prefill/decode execution, evaluation, tracing, and experiment recording.
+Typical downstream topics include:
 
-Typical downstream research topics include:
+- KV distribution and redundancy;
+- attention, head, and token analysis;
+- Prefill compression and Decode eviction;
+- quantization, sparsity, merging, and reconstruction;
+- temporal behavior and access-pattern traces;
+- later system or accelerator studies.
 
-- KV Cache distribution and redundancy analysis
-- attention/head/token importance analysis
-- prefill KV compression
-- decode KV compression or eviction
-- KV sparsity
-- KV quantization
-- KV merging or reconstruction
-- head-wise or token-wise policies
-- temporal stability analysis
-- KV access-pattern analysis
-- later-stage hardware/system-oriented studies
+This is an algorithm and phenomenon research base, not a production serving
+framework, universal policy language, or hardware simulator. Downstream work
+may modify attention, cache internals, kernels, or model-specific code when
+necessary. Prefer reusing roughly 80% of the common infrastructure while
+allowing the remaining 20% to be specialized.
 
-This is **not** intended to become a production serving framework or a universal plugin system that can express every possible KV method without modifying source code.
+## 2. Working Principles
 
-The design target is:
+- Keep abstractions small and research-useful.
+- Make observation independent from intervention.
+- Preserve existing KVPress Press behavior where practical.
+- Treat Prefill and Decode as explicit execution phases.
+- Do not materialize Q or full attention weights unless an experiment needs
+  them.
+- Keep logical KV reduction separate from physical bytes, traffic, latency,
+  and throughput claims.
+- Do not force every downstream idea into one rigid API.
 
-> Reuse roughly 80% of common infrastructure while allowing the remaining 20% to be modified freely for a specific research idea.
-
----
-
-## 2. Core development principle
-
-Do not over-engineer the framework.
-
-Prefer a small number of stable, research-useful abstractions over a large generic architecture.
-
-The base framework should make the following two operations easy:
-
-1. **Observe KV-related behavior without changing model semantics.**
-2. **Intervene in KV Cache behavior when an experiment requires it.**
-
-A downstream project is allowed to modify attention implementations, cache internals, kernels, or model-specific code when necessary. The base framework exists to reduce repeated work, not to prohibit specialized modifications.
-
----
-
-## 3. Before modifying code
-
-When starting from a fresh clone or when the upstream KVPress version changes:
-
-1. Read this file.
-2. Read `BASE_STATUS.md`.
-3. Read `docs/PROJECT_GOALS.md`.
-4. Read the current documents under `docs/` that describe project goals and
-   base architecture.
-5. Inspect the actual checked-out KVPress source code.
-6. Inspect the current source before changing architecture. Historical
-   upstream audit documents are not required to remain in this personal base.
-7. Verify the original upstream baseline before making architectural changes.
-
-Do **not** assume that previously documented KVPress internals still match the current checkout.
-
-Repository documentation must reflect the code that is actually present in the current branch.
-
-If upstream KVPress contains additional `AGENTS.md` files or repository-specific instructions, preserve and follow them unless they conflict with the explicit goals of this fork. Do not silently discard upstream instructions.
-
----
-
-## 4. Phase 0: understand upstream KVPress first
-
-Before implementing KV-Base changes, document the current upstream execution path.
-
-At minimum, determine:
-
-- How models are loaded.
-- How generation is invoked.
-- How attention modules are reached.
-- How Q/K/V are produced or accessed.
-- How `past_key_values` / Hugging Face Cache objects flow through generation.
-- How KVPress obtains and modifies KV Cache.
-- When a Press executes relative to attention.
-- How prefill and decode are distinguished.
-- How decode-time cache growth is handled.
-- How existing decoding-related Press implementations work.
-- How quantized caches are handled, if supported in the current checkout.
-- Which model families are supported.
-- Which parts are model-specific.
-- How evaluation scripts invoke generation.
-- What outputs, metrics, and metadata are already recorded.
-
-Record the findings in:
-
-- `docs/base/architecture.md`
-- `docs/base/extension_guide.md`
-- `docs/base/experiment_conventions.md`
-
-These documents should reference concrete files, classes, and functions from the checked-out repository.
-
-Do not begin a large refactor until this upstream documentation is sufficiently complete to explain the existing execution path.
-
----
-
-## 5. Target KV-Base architecture
-
-The first version should remain close to KVPress and introduce only the minimum infrastructure needed for repeated research work.
-
-The target conceptual architecture is:
+The current architecture and extension points are documented in:
 
 ```text
-Model / Generation
-       |
-       v
-Prefill / Decode Lifecycle
-       |
-       v
-Attention / Cache Access
-       |
-       +----------------------+
-       |                      |
-       v                      v
-   KV Observer            KV Intervention
-       |                      |
-       v                      v
- analysis / tracing        Press / policy
-       |                      |
-       +----------+-----------+
-                  |
-                  v
-               Recorder
-                  |
-                  v
-              Evaluation
+docs/base/architecture.md
+docs/base/extension_guide.md
+docs/base/experiment_conventions.md
 ```
 
-The important additions are:
+## 3. Before Modifying Code
 
-- a unified execution context
-- observation hooks
-- experiment recording
-- explicit prefill/decode semantics
+For a fresh clone or an upstream version change:
 
-Do not replace all existing KVPress mechanisms merely for architectural cleanliness.
+1. Read `AGENTS.md`, `BASE_STATUS.md`, and `docs/PROJECT_GOALS.md`.
+2. Read `docs/base/architecture.md`, `extension_guide.md`, and
+   `experiment_conventions.md`.
+3. Inspect the actual checked-out source, especially `pipeline.py`,
+   `utils.py`, `context.py`, `observer.py`, `recorder.py`, and the relevant
+   Press classes.
+4. Verify the current baseline before making architectural changes.
+5. Refresh documentation when the source and documentation disagree.
 
-Where possible, keep existing KVPress Press behavior working. Evaluation
-scripts and benchmark directories are intentionally outside this compact base;
-research branches may add the evaluation code they need.
+Do not assume that an older KVPress audit or a previous branch still matches
+the current checkout. Preserve any additional upstream `AGENTS.md` files
+unless they conflict with this fork's explicit goals.
 
----
+Before changing generation or cache behavior, determine from the current code:
 
-## 6. Stable concepts to introduce
+- how models and generation are invoked;
+- how attention modules and Hugging Face Cache objects are reached;
+- where Q/K/V and attention weights are available;
+- how Prefill and Decode are distinguished;
+- when Press hooks execute and how cache writes are applied;
+- how Decode cache growth and QuantizedCache paths work;
+- which model families and model-specific paths are supported;
+- what existing tests and metadata cover the affected path.
 
-### 6.1 KVContext
+Record implementation facts in the base documentation. Do not fill gaps with
+assumptions.
 
-Introduce a lightweight context object or equivalent mechanism that makes important execution metadata available in a consistent form.
+## 4. Change Discipline
 
-The exact implementation should be chosen only after inspecting the current KVPress code.
+Prefer small, reviewable changes. Do not mix a broad architecture refactor
+with a new paper algorithm.
 
-Conceptually it should expose fields such as:
+For each meaningful change, document:
 
 ```text
-phase                 # PREFILL or DECODE
-layer_id
-decode_step
-prefill_length
-total_length
-
-input_ids
-position_ids
-hidden_states
-
-q                      # when available / explicitly requested
-k
-v
-attention              # optional; avoid forcing expensive attention materialization
-
-cache
-recorder
+What changed?
+Why?
+What was the previous behavior?
+What is the new behavior?
+Which code path is affected?
+Does it affect Prefill, Decode, or both?
+How was it verified?
 ```
 
-Not every field must always be populated.
+Add a focused regression test for shared infrastructure. Keep method-specific
+scoring rules, one-off visualizations, model workarounds, and specialized
+kernels in downstream research code unless multiple projects need them.
 
-Avoid forcing expensive tensors such as full attention matrices to be materialized unless an experiment explicitly requests them.
+When removing code, first scan imports, public exports, pipeline references,
+tests, documentation, and dependencies. Do not leave broken public imports or
+stale dependency declarations.
 
----
+## 5. Documentation Rules
 
-### 6.2 Observer
-
-Add an observation path that can inspect or record KV-related information **without modifying the cache**.
-
-Typical uses:
-
-- K/V norm statistics
-- Q/K/V distribution analysis
-- attention distribution analysis
-- per-head behavior
-- per-token importance
-- temporal stability
-- decode-step evolution
-- reuse/access-pattern analysis
-
-Observation must be separable from intervention.
-
-A user should be able to run an analysis experiment without implementing a fake compression method.
-
----
-
-### 6.3 Recorder
-
-Provide one reusable experiment recorder rather than allowing every downstream idea to invent its own `torch.save`, NumPy, JSON, or directory conventions.
-
-The recorder should support:
-
-- run-level metadata
-- sample-level metadata
-- scalar metrics
-- layer/head/token statistics
-- optional tensor dumps
-- trace-style records
-
-The first implementation should remain simple and transparent.
-
-Do not introduce a database or heavy experiment-management dependency unless later work clearly requires it.
-
----
-
-### 6.4 KV intervention
-
-Preserve KVPress's existing Press mechanism where practical.
-
-Do not immediately replace `BasePress` or existing Press subclasses with a completely new policy hierarchy.
-
-The first KV-Base version should support both:
+Documentation is part of the framework. Keep these files current:
 
 ```text
-Observer path       -> inspect only
-Press path          -> modify KV Cache
-```
-
-A more general `KVMethod` abstraction may be introduced later only if repeated experiments demonstrate that the existing separation is insufficient.
-
----
-
-## 7. Prefill and decode are first-class concepts
-
-The framework must explicitly distinguish:
-
-```text
-PREFILL
-DECODE
-```
-
-Do not treat generation as one undifferentiated forward path.
-
-Where possible, expose:
-
-```text
-phase
-prefill_length
-decode_step
-total_length
-```
-
-This is a core requirement because many KV Cache research questions differ fundamentally between prefill and decode.
-
-Examples include:
-
-- prefill-only token selection
-- decode-time KV growth
-- online eviction
-- temporal head stability
-- reasoning-generated KV
-- long-generation KV reuse
-
----
-
-## 8. Standard research indexing convention
-
-Where practical, use the following conceptual dimensions consistently:
-
-```text
-Layer x Head x Token
-```
-
-For decode-time traces:
-
-```text
-Step x Layer x Head x Token
-```
-
-Recommended notation:
-
-```text
-L = layer
-H = head
-T = KV token
-S = decode step
-```
-
-This convention should be used in recorder metadata, analysis scripts, and saved traces whenever it is natural.
-
-Do not force tensors into this shape when doing so creates unnecessary copies or memory overhead. Preserve logical indexing even if the physical layout differs.
-
----
-
-## 9. Experiment modes
-
-The framework should support two explicit research modes.
-
-### Observe mode
-
-Purpose:
-
-- discover phenomena
-- collect statistics
-- generate heatmaps/traces
-- test hypotheses without changing inference semantics
-
-Expected behavior:
-
-```text
-model execution
-    ->
-observer
-    ->
-recorder
-```
-
-The observer should not modify KV state.
-
-### Intervention mode
-
-Purpose:
-
-- compression
-- eviction
-- quantization
-- sparsity
-- merging
-- reconstruction
-- placement or other KV policy experiments
-
-Expected behavior:
-
-```text
-model execution
-    ->
-policy / Press
-    ->
-modified KV state
-    ->
-evaluation
-```
-
-Where useful, an experiment may combine observation and intervention.
-
----
-
-## 10. Evaluation philosophy
-
-The base framework should preserve upstream evaluation functionality whenever possible.
-
-A research change should ideally be testable at several levels:
-
-1. **Functional smoke test**
-   - generation still runs
-   - cache length/state is sensible
-
-2. **Semantic regression**
-   - with all new features disabled, behavior should match upstream baseline as closely as expected
-
-3. **Research metric**
-   - accuracy / perplexity / benchmark metric / task-specific outcome
-
-4. **System metric when relevant**
-   - KV size
-   - bytes read/written
-   - decode latency
-   - prefill latency
-   - memory usage
-   - metadata overhead
-
-Do not claim hardware savings solely from logical KV reduction.
-
-Logical compression and physical execution cost must be treated as different questions.
-
----
-
-## 11. Scope boundary: algorithm base vs system/hardware validation
-
-This repository is primarily the **algorithm and phenomenon exploration layer**.
-
-It should answer questions such as:
-
-- Does the KV pattern exist?
-- Is it stable across layers/heads/steps?
-- Can tokens be removed?
-- Can KV be quantized?
-- Does accuracy remain acceptable?
-- What logical KV reduction is achieved?
-
-For later system or accelerator validation, downstream projects may integrate with or port ideas to:
-
-- vLLM
-- FlashInfer
-- LMCache
-- custom CUDA
-- custom simulator / hardware model
-
-Do not prematurely reshape the entire base around paged serving or hardware-specific layouts.
-
----
-
-## 12. Documentation requirements
-
-Documentation is part of the framework.
-
-After any meaningful architectural change, update the relevant documents.
-
-Important files:
-
-```text
+README.md
 AGENTS.md
 BASE_STATUS.md
-
 docs/PROJECT_GOALS.md
 docs/base/architecture.md
 docs/base/extension_guide.md
 docs/base/experiment_conventions.md
 ```
 
-When recording a change, document:
+`AGENTS.md` contains operating rules. Detailed runtime behavior belongs in
+`docs/base/architecture.md`; research workflow belongs in
+`docs/base/extension_guide.md`; indexing and result metadata belong in
+`docs/base/experiment_conventions.md`.
 
-```text
-What changed?
-Why was it changed?
-What was the upstream behavior?
-What is the new behavior?
-Which code path is affected?
-Does it affect prefill, decode, or both?
-How was it verified?
+Do not maintain documentation as a file-by-file changelog. Explain design
+intent and current behavior.
+
+## 6. v0.1 Acceptance Checks
+
+Before treating the base as usable, verify these cases:
+
+### Observation only
+
+- inference runs;
+- an Observer records at least one layer/head/token statistic;
+- Prefill/Decode context metadata is correct;
+- output remains baseline-equivalent within expected numerical behavior;
+- the Observer does not mutate the cache.
+
+### Prefill intervention
+
+- a simple deterministic or random retention policy modifies Prefill K/V;
+- cache length/state is sensible;
+- generation continues after the modification.
+
+### Decode intervention
+
+- a controlled operation runs at a known Decode interval;
+- `decode_step` tracking is correct and monotonic;
+- cache updates remain valid;
+- generation continues after the modification.
+
+The focused test suite is:
+
+```bash
+.venv/bin/python -m pytest \
+  tests/test_context.py \
+  tests/test_observer.py \
+  tests/test_recorder.py \
+  tests/test_infrastructure.py \
+  tests/test_attention_patch.py -q
 ```
 
-Do not maintain documentation as a file-by-file changelog only.
+Also run, when the environment permits:
 
-Explain design intent.
-
----
-
-## 13. Change discipline
-
-Prefer small, reviewable commits.
-
-Recommended initial sequence:
-
-```text
-1. docs: document checked-out upstream KVPress architecture
-2. test: establish reproducible upstream baseline
-3. feat: introduce execution context
-4. feat: add observer infrastructure
-5. feat: add recorder infrastructure
-6. test: validate observe mode does not change baseline behavior
-7. docs: document KV-Base architecture and extension workflow
+```bash
+.venv/bin/python -m compileall -q kvpress tests
+UV_CACHE_DIR=/tmp/kvbase-uv-cache uv pip check --python .venv/bin/python
 ```
 
-Do not mix a large architectural refactor with implementation of a new research algorithm in the same initial change.
+For a real model, smoke-test ordinary generation, Prefill Press generation,
+and Decode Press generation. Record model, revision, commit, device, dtype,
+and cache configuration. Model downloads and GPU availability are environment
+conditions, not reasons to claim unverified results.
 
----
+## 7. v0.1 Boundaries
 
-## 14. Initial acceptance tests for KV-Base v0.1
+Do not make the base depend on:
 
-Before considering the base framework usable, demonstrate at least these three cases.
+- custom CUDA kernels;
+- vLLM or serving internals;
+- a database or heavy experiment manager;
+- a physical KV memory manager;
+- a universal policy DSL or large plugin registry;
+- a full accelerator simulator.
 
-### Case A: observation only
-
-Run inference without modifying KV Cache and record at least one layer/head/token statistic.
-
-Expected result:
-
-- output semantics remain baseline-equivalent within the expected numerical behavior
-- recorder output is produced
-- prefill/decode context is correct
-
-### Case B: prefill KV modification
-
-Implement a simple reference intervention such as deterministic or random retention of a fraction of prefill KV tokens.
-
-Purpose:
-
-- validate that the base can alter prefill KV state
-- not intended as a research contribution
-
-### Case C: decode KV modification
-
-Implement a simple reference decode-time intervention, e.g. every N decode steps perform a controlled cache operation.
-
-Purpose:
-
-- validate decode lifecycle access
-- validate step tracking
-- validate cache update correctness
-
-These examples should remain simple and serve as infrastructure tests.
-
----
-
-## 15. What not to do in v0.1
-
-Do not make the first version depend on:
-
-- a custom CUDA kernel
-- vLLM internals
-- a new database
-- a complex physical KV memory manager
-- a universal policy DSL
-- a large plugin registry
-- a full accelerator simulator
-
-Do not require all downstream research ideas to fit one rigid API.
-
-Do not optimize for production throughput before the research workflow is stable.
-
----
-
-## 16. Expected downstream workflow
-
-The intended workflow is:
-
-```text
-kv-base
-   |
-   +--> idea-catekv-style
-   |
-   +--> idea-decode-kv
-   |
-   +--> idea-head-stability
-   |
-   +--> idea-kv-quant
-   |
-   +--> idea-kv-sparsity
-```
-
-A downstream idea should primarily need to modify:
-
-```text
-method-specific code
-analysis code
-experiment configuration
-```
-
-Common infrastructure should remain reusable:
-
-```text
-model loading
-generation
-KV access
-prefill/decode lifecycle
-recording
-evaluation
-```
-
-A good design target is that an early prototype of a new KV idea can often be expressed in a few hundred lines of method/analysis code without repeatedly rewriting model-generation infrastructure.
+Downstream projects may later integrate vLLM, FlashInfer, LMCache, custom
+CUDA, simulators, or accelerator models for physical-system validation.
