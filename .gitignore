@@ -169,3 +169,5 @@ cython_debug/
 
 # IDE
 .vscode/
+third_party/*
+experiments/head_analysis/data/
