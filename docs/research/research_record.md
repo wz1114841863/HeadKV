@@ -33,3 +33,18 @@ GovReport	     20	      20       _	真实长文本摘要
 PG19	         10	      _	      10	配对长度/长 Decode
 合计	         50	      20	  30
 
+### 数据构建约定
+
+固定数据集包含 100 个输入:RULER `niah_single_2` 在 8K/32K 各 20 个,
+GovReport 在 8K/16K 各 20 个,PG19 的 10 个共享续写锚点配对分别构成 8K/32K
+输入各 10 个.构建时必须审计每个"数据集 × 目标长度"组的精确计数,且 GovReport
+跨长度组不得复用同一报告.
+
+GovReport 和 PG19 的远程原始输入是 Hugging Face 下载的 Parquet shard,而不是
+`Dataset.save_to_disk()` 目录.数据准备脚本应直接读取这些不可变 shard;不因接口
+格式差异重下载或复制原始数据.PG19 需保留其 `url` 作为 source ID/
+`short_book_title` 作为书名元数据.
+
+RULER 使用官方生成器的 `niah_single_2`:单 key/单数值/单 query,essay 作为
+haystack.旧的 `niah_single_1`(noise haystack)保留为独立的历史原始数据,不得覆盖
+或误标为 `single_2`.最终固定提示集以新版本输出目录/manifest 和 SHA-256 冻结.

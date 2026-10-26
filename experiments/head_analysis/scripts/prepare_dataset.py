@@ -8,6 +8,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
+
 from transformers import AutoTokenizer
 
 GOV_PREFIX = (
@@ -29,9 +30,7 @@ def fail(message: str) -> None:
 
 
 def digest(data: str | bytes) -> str:
-    return hashlib.sha256(
-        data.encode("utf-8") if isinstance(data, str) else data
-    ).hexdigest()
+    return hashlib.sha256(data.encode("utf-8") if isinstance(data, str) else data).hexdigest()
 
 
 def json_dump(obj: Any, path: Path) -> None:
@@ -58,6 +57,29 @@ def iter_jsonl(path: Path) -> Iterable[dict]:
                 yield json.loads(line)
             except json.JSONDecodeError as e:
                 fail(f"JSONL parse error {path}:{line_no}: {e}")
+
+
+def parquet_files(path: Path) -> list[Path]:
+    if path.is_file() and path.suffix == ".parquet":
+        return [path]
+    if path.is_dir():
+        return sorted(path.rglob("*.parquet"))
+    return []
+
+
+def load_parquet(path: Path) -> list[dict]:
+    files = parquet_files(path)
+    if not files:
+        fail(f"No Parquet shards found at {path}")
+    # Read the immutable downloaded shards directly.  They are not a
+    # Dataset.save_to_disk artifact, so load_from_disk() is intentionally not
+    # used here.
+    import pyarrow.parquet as pq
+
+    rows = []
+    for file in files:
+        rows.extend(pq.ParquetFile(file).read().to_pylist())
+    return rows
 
 
 def load_tokenizer(path: str):
@@ -126,6 +148,8 @@ def load_gov(source: str, cache_dir: str | None = None) -> list[dict]:
     path = Path(source)
     if path.is_file() and path.suffix == ".jsonl":
         return list(iter_jsonl(path))
+    if parquet_files(path):
+        return load_parquet(path)
     if path.is_dir():
         from datasets import load_from_disk
 
@@ -142,7 +166,7 @@ def load_gov(source: str, cache_dir: str | None = None) -> list[dict]:
                 cache_dir=cache_dir,
             )
         )
-    fail("GovReport: source must be HF save_to_disk directory, JSONL, or 'hf-cache'")
+    fail("GovReport: source must be Parquet, HF save_to_disk directory, JSONL, or 'hf-cache'")
 
 
 def load_pg19(source: str, fmt: str) -> list[dict]:
@@ -150,6 +174,8 @@ def load_pg19(source: str, fmt: str) -> list[dict]:
     if fmt == "auto":
         if path.is_file() and path.suffix == ".jsonl":
             fmt = "jsonl"
+        elif parquet_files(path):
+            fmt = "parquet"
         elif path.is_dir() and list(path.glob("*.txt")):
             fmt = "txtdir"
         else:
@@ -158,6 +184,8 @@ def load_pg19(source: str, fmt: str) -> list[dict]:
         if not path.is_file():
             fail(f"PG19 JSONL missing: {path}")
         return list(iter_jsonl(path))
+    if fmt == "parquet":
+        return load_parquet(path)
     if fmt == "txtdir":
         files = sorted(path.glob("*.txt"))
         if not files:
@@ -196,8 +224,8 @@ def as_text(v: Any) -> str:
 
 
 def pg_fields(row: dict, idx: int) -> tuple[str, str, str]:
-    book_id = as_text(row.get("book_id", row.get("id", idx)))
-    title = as_text(row.get("book_title", row.get("title", book_id)))
+    book_id = as_text(row.get("book_id", row.get("id", row.get("url", idx))))
+    title = as_text(row.get("book_title", row.get("short_book_title", row.get("title", book_id))))
     text = as_text(row.get("book_text", row.get("text", "")))
     return book_id, title, text
 
@@ -276,61 +304,80 @@ def scan_gov(args) -> None:
     print(f"Saved {out}")
 
 
-def select_gov(
+def target_label(target: int) -> str:
+    if target > 0 and target % 1024 == 0:
+        return f"{target // 1024}k"
+    return str(target)
+
+
+def select_gov_targets(
     t,
     rows: list[dict],
-    n: int,
-    target: int,
+    targets: list[int],
+    n_per_target: int,
     tolerance: int,
     seed: int,
     max_new_tokens: int,
 ) -> tuple[list[dict], dict]:
     stats = count_gov(t, rows)
-    eligible = [x for x in stats if abs(x["prompt_tokens"] - target) <= tolerance]
-    # Avoid duplicated reports across distinct rows.
-    seen = set()
-    unique = []
-    for x in eligible:
-        if x["content_sha256"] not in seen:
-            seen.add(x["content_sha256"])
-            unique.append(x)
-    if len(unique) < n:
-        fail(
-            f"GovReport: only {len(unique)} usable samples within {target}±{tolerance} "
-            f"tokens, need {n}; widen --gov-tolerance or use another target"
-        )
-    rng = random.Random(seed)
-    rng.shuffle(unique)
-    chosen = unique[:n]
-    chosen.sort(key=lambda x: (x["prompt_tokens"], x["source_index"]))
     result = []
-    for i, x in enumerate(chosen, 1):
-        row = rows[x["source_index"]]
-        result.append(
-            make_record(
-                t,
-                sample_id=f"govreport_{i:03d}_8k",
-                dataset="govreport",
-                task="summarization",
-                user_content=gov_content(as_text(row["report"])),
-                source_id=x["source_id"],
-                target=target,
-                max_new_tokens=max_new_tokens,
-                reference_answer=as_text(row["summary"]),
-                metadata={
-                    "source_index": x["source_index"],
-                    "report_sha256": x["content_sha256"],
-                    "selection_window": [target - tolerance, target + tolerance],
-                    "source_split": "test",
-                },
-            )
-        )
-    return result, {
+    report = {
         "total_candidates": len(stats),
-        "eligible": len(unique),
-        "selected": n,
         "length_summary": length_summary([x["prompt_tokens"] for x in stats]),
+        "targets": {},
     }
+    used_content = set()
+    for target in sorted(set(targets)):
+        eligible = [
+            x
+            for x in stats
+            if abs(x["prompt_tokens"] - target) <= tolerance and x["content_sha256"] not in used_content
+        ]
+        # Avoid duplicated reports both within and across target-length groups.
+        unique = []
+        seen = set()
+        for x in eligible:
+            if x["content_sha256"] not in seen:
+                seen.add(x["content_sha256"])
+                unique.append(x)
+        if len(unique) < n_per_target:
+            fail(
+                f"GovReport: only {len(unique)} unused samples within "
+                f"{target}±{tolerance} tokens, need {n_per_target}; "
+                "widen --gov-tolerance or use another target"
+            )
+        rng = random.Random(f"{seed}:govreport:{target}")
+        rng.shuffle(unique)
+        chosen = unique[:n_per_target]
+        chosen.sort(key=lambda x: (x["prompt_tokens"], x["source_index"]))
+        group = target_label(target)
+        for i, x in enumerate(chosen, 1):
+            row = rows[x["source_index"]]
+            result.append(
+                make_record(
+                    t,
+                    sample_id=f"govreport_{group}_{i:03d}",
+                    dataset="govreport",
+                    task="summarization",
+                    user_content=gov_content(as_text(row["report"])),
+                    source_id=x["source_id"],
+                    target=target,
+                    max_new_tokens=max_new_tokens,
+                    reference_answer=as_text(row["summary"]),
+                    metadata={
+                        "source_index": x["source_index"],
+                        "report_sha256": x["content_sha256"],
+                        "selection_window": [target - tolerance, target + tolerance],
+                        "source_split": "test",
+                    },
+                )
+            )
+        used_content.update(x["content_sha256"] for x in chosen)
+        report["targets"][str(target)] = {
+            "eligible_unused": len(unique),
+            "selected": n_per_target,
+        }
+    return result, report
 
 
 def pg_token_prefix(t, book_text: str, char_limit: int) -> list[int]:
@@ -339,9 +386,7 @@ def pg_token_prefix(t, book_text: str, char_limit: int) -> list[int]:
     return encode(t, book_text[:char_limit])
 
 
-def choose_pg_context(
-    t, token_prefix: list[int], anchor: int, target: int, tolerance: int
-) -> tuple[str, int]:
+def choose_pg_context(t, token_prefix: list[int], anchor: int, target: int, tolerance: int) -> tuple[str, int]:
     # Find a context slice whose *rendered* Llama chat prompt is close to target.
     # Slice end is fixed at anchor; 8K and 32K share the same continuation point.
     lo = 1
@@ -410,10 +455,7 @@ def select_pg19(
         # Stable per-book random anchor, shared by both length groups.
         anchor = rng.randint(anchor_min, anchor_high)
         try:
-            contexts = [
-                choose_pg_context(t, tokens, anchor, target, tolerance)
-                for target in targets
-            ]
+            contexts = [choose_pg_context(t, tokens, anchor, target, tolerance) for target in targets]
         except ValueError:
             failure["prompt_budget_not_met"] += 1
             continue
@@ -432,9 +474,7 @@ def select_pg19(
             clean_up_tokenization_spaces=False,
         )
         pair = []
-        for group, (target, (context, observed_len)) in zip(
-            ("8k", "32k"), zip(targets, contexts)
-        ):
+        for group, (target, (context, observed_len)) in zip(("8k", "32k"), zip(targets, contexts)):
             rec = make_record(
                 t,
                 sample_id=f"{pair_id}_{group}",
@@ -493,12 +533,10 @@ def resolve_ruler(path_str: str) -> Path:
 
 
 def ruler_value_position(t, source_input: str, answer: str) -> tuple[int, float]:
-    # For niah_single_2 the *answer* appears once inside its inserted needle.
+    # For a single-needle NIAH task the answer appears once in the inserted needle.
     positions = [m.start() for m in re.finditer(re.escape(answer), source_input)]
     if len(positions) != 1:
-        fail(
-            f"RULER answer '{answer}' occurs {len(positions)} times in input (expected 1)"
-        )
+        fail(f"RULER answer '{answer}' occurs {len(positions)} times in input (expected 1)")
     approx_pos = len(encode(t, source_input[: positions[0]]))
     return approx_pos, approx_pos / max(1, len(encode(t, source_input)))
 
@@ -512,19 +550,18 @@ def select_ruler(
     tolerance: int,
     max_new_tokens: int,
     seed: int,
+    task: str,
 ) -> tuple[list[dict], dict]:
     path = resolve_ruler(path_str)
+    if path.parent.name != task:
+        fail(f"RULER source task mismatch: expected {task}, found {path.parent.name} " f"at {path}")
     raw = list(iter_jsonl(path))
     candidates = []
     rejects = Counter()
     for idx, item in enumerate(raw):
         content = item.get("input")
         answers = item.get("outputs")
-        if (
-            not isinstance(content, str)
-            or not isinstance(answers, list)
-            or len(answers) != 1
-        ):
+        if not isinstance(content, str) or not isinstance(answers, list) or len(answers) != 1:
             rejects["schema_not_single_needle"] += 1
             continue
         answer = as_text(answers[0])
@@ -562,7 +599,7 @@ def select_ruler(
                 t,
                 sample_id=f"ruler_{group}_{i:03d}",
                 dataset="ruler",
-                task="niah_single_2",
+                task=task,
                 user_content=content,
                 source_id=f"{path.name}:{idx}",
                 target=target,
@@ -573,6 +610,7 @@ def select_ruler(
                     "source_file": str(path.resolve()),
                     "source_row": idx,
                     "source_split": path.stem,
+                    "ruler_task": task,
                     "ruler_original_index": item.get("index"),
                     "source_reported_length": item.get("length"),
                     "source_token_position_answer": item.get("token_position_answer"),
@@ -584,13 +622,12 @@ def select_ruler(
         )
     # Do not claim controlled 10/30/... needle depth when the existing pool is random.
     buckets = {
-        f"{left}-{left+20}%": sum(
-            left / 100 <= x[4] < (left + 20) / 100 for x in selected
-        )
+        f"{left}-{left+20}%": sum(left / 100 <= x[4] < (left + 20) / 100 for x in selected)
         for left in (0, 20, 40, 60, 80)
     }
     return result, {
         "source_file": str(path),
+        "task": task,
         "raw": len(raw),
         "eligible": len(candidates),
         "selected": len(selected),
@@ -605,6 +642,7 @@ def validate_records(
     records: list[dict],
     t,
     counts: dict[str, int],
+    expected_dataset_targets: dict[str, int] | None,
     tolerance_gov: int,
     tolerance_pg: int,
     tolerance_ruler: int,
@@ -616,6 +654,7 @@ def validate_records(
     seen_ids = set()
     seen_input = set()
     types = Counter()
+    dataset_targets = Counter()
     pg_pairs = {}
     sources = {}
     for rec in records:
@@ -625,10 +664,9 @@ def validate_records(
         seen_ids.add(sid)
         dataset = rec.get("dataset")
         types[dataset] += 1
+        dataset_targets[f"{dataset}:{rec.get('target_prompt_length')}"] += 1
         token_ids = rec.get("input_ids")
-        if not isinstance(token_ids, list) or any(
-            not isinstance(x, int) for x in token_ids
-        ):
+        if not isinstance(token_ids, list) or any(not isinstance(x, int) for x in token_ids):
             errors.append(f"{sid}: bad input_ids")
             continue
         prompt = rec.get("prompt", "")
@@ -638,19 +676,13 @@ def validate_records(
         if len(token_ids) != rec.get("actual_prompt_length"):
             errors.append(f"{sid}: actual_prompt_length mismatch")
         if len(token_ids) + rec.get("max_new_tokens", 0) > max_context:
-            errors.append(
-                f"{sid}: prompt + decode budget exceeds context {max_context}"
-            )
-        if digest(json.dumps(token_ids, separators=(",", ":"))) != rec.get(
-            "input_sha256"
-        ):
+            errors.append(f"{sid}: prompt + decode budget exceeds context {max_context}")
+        if digest(json.dumps(token_ids, separators=(",", ":"))) != rec.get("input_sha256"):
             errors.append(f"{sid}: token hash mismatch")
         if detailed:
             if encode(t, prompt) != token_ids:
                 errors.append(f"{sid}: tokenizer(prompt) does not match input_ids")
-            expected, _ = render_prompt(
-                t, rec.get("user_content", ""), rec.get("assistant_prefix", "")
-            )
+            expected, _ = render_prompt(t, rec.get("user_content", ""), rec.get("assistant_prefix", ""))
             if expected != prompt:
                 errors.append(f"{sid}: chat template mismatch")
         if rec["input_sha256"] in seen_input:
@@ -663,17 +695,13 @@ def validate_records(
             "ruler": tolerance_ruler,
         }.get(dataset, 0)
         if abs(len(token_ids) - target) > tol:
-            errors.append(
-                f"{sid}: token length {len(token_ids)} outside {target}±{tol}"
-            )
+            errors.append(f"{sid}: token length {len(token_ids)} outside {target}±{tol}")
         if dataset == "ruler":
             answers = rec.get("reference_answer")
             if not isinstance(answers, list) or len(answers) != 1:
                 errors.append(f"{sid}: expected one RULER answer")
             elif rec.get("user_content", "").count(as_text(answers[0])) != 1:
-                errors.append(
-                    f"{sid}: RULER needle answer is not unique in user content"
-                )
+                errors.append(f"{sid}: RULER needle answer is not unique in user content")
         if dataset == "pg19":
             pg_pairs.setdefault(rec.get("pair_id"), []).append(rec)
         if dataset == "govreport" and not rec.get("reference_answer"):
@@ -686,6 +714,11 @@ def validate_records(
     for name, expected in counts.items():
         if types[name] != expected:
             errors.append(f"{name}: got {types[name]}, expected {expected}")
+    if expected_dataset_targets is not None:
+        for name, expected in expected_dataset_targets.items():
+            actual = dataset_targets[name]
+            if actual != expected:
+                errors.append(f"{name}: got {actual}, expected {expected}")
     for pair_id, pair in pg_pairs.items():
         if not pair_id or len(pair) != 2:
             errors.append(f"PG19 pair {pair_id} has {len(pair)} records, expected 2")
@@ -709,21 +742,17 @@ def validate_records(
         # Continuation context is the same suffix (except tiny tokenizer boundary artifacts).
         short_ctx = short["user_content"][len(PG_PREFIX) : -len(PG_SUFFIX)]
         long_ctx = long["user_content"][len(PG_PREFIX) : -len(PG_SUFFIX)]
-        if (
-            short_ctx[-min(1000, len(short_ctx)) :]
-            != long_ctx[-min(1000, len(short_ctx)) :]
-        ):
+        if short_ctx[-min(1000, len(short_ctx)) :] != long_ctx[-min(1000, len(short_ctx)) :]:
             errors.append(f"PG19 {pair_id}: last 1000 characters not identical")
     return {
         "passed": not errors,
         "counts": dict(types),
+        "dataset_target_counts": dict(dataset_targets),
         "total": len(records),
         "errors": errors,
         "warnings": warnings,
         "lengths": {
-            name: length_summary(
-                [r["actual_prompt_length"] for r in records if r["dataset"] == name]
-            )
+            name: length_summary([r["actual_prompt_length"] for r in records if r["dataset"] == name])
             for name in counts
         },
         "pg19_pairs": len(pg_pairs),
@@ -758,23 +787,24 @@ def write_selection_csv(records: list[dict], path: Path) -> None:
             )
 
 
-def make_manifest(
-    path: Path, records: list[dict], t, args, audit: dict, sources: dict
-) -> dict:
+def make_manifest(path: Path, records: list[dict], t, args, audit: dict, sources: dict) -> dict:
     return {
-        "schema_version": "head-analysis-dataset-v1",
+        "schema_version": "head-analysis-dataset-v2",
         "selection_seed": args.seed,
         "tokenizer_path": str(args.tokenizer),
         "tokenizer_class": type(t).__name__,
         "vocab_size": len(t),
         "model_context_limit": args.max_context,
-        "gov_target": args.gov_target,
+        "gov_targets": sorted(args.gov_targets),
+        "gov_count_per_length": args.gov_count_per_length,
         "gov_tolerance": args.gov_tolerance,
         "pg_targets": [8192, 32768],
         "pg_tolerance": args.pg_tolerance,
         "ruler_tolerance": args.ruler_tolerance,
+        "ruler_task": args.ruler_task,
         "sources": sources,
         "counts": audit["counts"],
+        "dataset_target_counts": audit["dataset_target_counts"],
         "data_file": "prompts.jsonl",
         "data_sha256": digest(path.read_bytes()),
         "template_sha256": {
@@ -788,11 +818,11 @@ def make_manifest(
 def build(args) -> None:
     t = load_tokenizer(args.tokenizer)
     print("[1/4] Reading GovReport...")
-    gov, gov_report = select_gov(
+    gov, gov_report = select_gov_targets(
         t,
         load_gov(args.govreport_source, args.hf_cache_dir),
-        args.gov_count,
-        args.gov_target,
+        args.gov_targets,
+        args.gov_count_per_length,
         args.gov_tolerance,
         args.seed,
         args.gov_decode,
@@ -819,6 +849,7 @@ def build(args) -> None:
         args.ruler_tolerance,
         args.ruler_decode,
         args.seed,
+        args.ruler_task,
     )
     r32, r32_report = select_ruler(
         t,
@@ -829,18 +860,27 @@ def build(args) -> None:
         args.ruler_tolerance,
         args.ruler_decode,
         args.seed,
+        args.ruler_task,
     )
     records = gov + pg + r8 + r32
     counts = {
-        "govreport": args.gov_count,
+        "govreport": len(set(args.gov_targets)) * args.gov_count_per_length,
         "pg19": args.pg_books * 2,
         "ruler": args.ruler_count_per_length * 2,
+    }
+    expected_dataset_targets = {
+        **{f"govreport:{target}": args.gov_count_per_length for target in set(args.gov_targets)},
+        "pg19:8192": args.pg_books,
+        "pg19:32768": args.pg_books,
+        "ruler:8192": args.ruler_count_per_length,
+        "ruler:32768": args.ruler_count_per_length,
     }
     print("[4/4] Running full validation...")
     audit = validate_records(
         records,
         t,
         counts,
+        expected_dataset_targets,
         args.gov_tolerance,
         args.pg_tolerance,
         args.ruler_tolerance,
@@ -854,18 +894,12 @@ def build(args) -> None:
     }
     out = Path(args.output)
     if (out / "prompts.jsonl").exists() or (out / "manifest.json").exists():
-        fail(
-            f"Final dataset already exists in {out}; use a new versioned output directory"
-        )
+        fail(f"Final dataset already exists in {out}; use a new versioned output directory")
     out.mkdir(parents=True, exist_ok=True)
     json_dump(audit, out / "selection_report.json")
     if not audit["passed"]:
-        print(
-            json.dumps(audit["errors"], indent=2, ensure_ascii=False), file=sys.stderr
-        )
-        fail(
-            "Dataset validation failed; no final dataset exported. See selection_report.json"
-        )
+        print(json.dumps(audit["errors"], indent=2, ensure_ascii=False), file=sys.stderr)
+        fail("Dataset validation failed; no final dataset exported. See selection_report.json")
     write_selection_csv(records, out / "selected_samples.csv")
     for name, subset in (("govreport", gov), ("pg19", pg), ("ruler", r8 + r32)):
         write_jsonl(subset, out / f"{name}.jsonl")
@@ -875,6 +909,7 @@ def build(args) -> None:
         "govreport_source": args.govreport_source,
         "pg19_source": args.pg19_source,
         "pg19_format": args.pg19_format,
+        "ruler_task": args.ruler_task,
         "ruler_8k": str(resolve_ruler(args.ruler_8k)),
         "ruler_32k": str(resolve_ruler(args.ruler_32k)),
     }
@@ -906,6 +941,7 @@ def verify(args) -> None:
         records,
         t,
         counts,
+        manifest.get("dataset_target_counts"),
         manifest["gov_tolerance"],
         manifest["pg_tolerance"],
         manifest["ruler_tolerance"],
@@ -934,15 +970,15 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--pg19-source", required=True)
     b.add_argument(
         "--pg19-format",
-        choices=["auto", "hf", "tfds", "jsonl", "txtdir"],
+        choices=["auto", "hf", "tfds", "jsonl", "parquet", "txtdir"],
         default="auto",
     )
     b.add_argument("--ruler-8k", required=True)
     b.add_argument("--ruler-32k", required=True)
     b.add_argument("--output", required=True)
     b.add_argument("--seed", type=int, default=42)
-    b.add_argument("--gov-count", type=int, default=20)
-    b.add_argument("--gov-target", type=int, default=8192)
+    b.add_argument("--gov-targets", type=int, nargs="+", default=[8192, 16384])
+    b.add_argument("--gov-count-per-length", type=int, default=20)
     b.add_argument("--gov-tolerance", type=int, default=1024)
     b.add_argument("--gov-decode", type=int, default=1024)
     b.add_argument("--pg-books", type=int, default=10)
@@ -953,6 +989,7 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--ruler-count-per-length", type=int, default=20)
     b.add_argument("--ruler-tolerance", type=int, default=512)
     b.add_argument("--ruler-decode", type=int, default=128)
+    b.add_argument("--ruler-task", default="niah_single_2")
     b.add_argument("--max-context", type=int, default=131072)
     b.set_defaults(func=build)
 
