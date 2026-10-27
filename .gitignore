@@ -172,3 +172,4 @@ cython_debug/
 third_party/*
 experiments/head_analysis/data/
 REMOTE_SERVER_ACCESS.md
+docs/paper/
