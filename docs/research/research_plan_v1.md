@@ -10,8 +10,11 @@
 
 **研究基础:** CateKV/FlexiCache (文件位于docs/paper)
 
-**当前状态:** 100 条固定 Prompt 已准备完成并通过数据校验；采集接口尚未修改。
-基础指标与数据接口由 [《V1-B1 Attention 指标定义与数据接口规范》](v1_b1_attention_metric_interface_spec.md) 单独冻结。
+**当前状态:** 100 条固定 Prompt 已准备完成并通过数据校验。已在
+`experiments/head_analysis/runtime/attention_probe.py` 实现仅内存捕获的 Llama/SDPA
+`AttentionProbe` 原型及 CPU 小模型回归测试；在线指标 Collector、分片 Writer、固定输入
+ExperimentRunner 和真实 GPU 验收尚未实现。基础指标与数据接口由
+[《V1-B1 Attention 指标定义与数据接口规范》](v1_b1_attention_metric_interface_spec.md) 单独冻结。
 
 ---
 
