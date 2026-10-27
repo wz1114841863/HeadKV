@@ -17,6 +17,8 @@ head_analysis/
 ├── runners/                  # 固定输入的 B1 推理编排
 │   ├── baseline_decode.py    # 无 Probe 的 Greedy ID 基线工件
 │   └── b1_runner.py          # Manifest 校验、Greedy Decode、组件串联
+├── analysis/                 # 完成工件的只读离线分析
+│   └── page_rco.py           # 双 Scope、k/Δ 敏感性 Page RCO
 ├── scripts/                  # 可直接执行的准备、下载和 smoke 脚本
 ├── tests/                    # 面向 runtime 与 scripts 的 CPU 回归测试
 └── README.md
@@ -52,3 +54,9 @@ Decode。长 Decode 验收先运行 `runners/baseline_decode.py`，它会用相�
 `--verify-baseline <artifact.json>`。采集结果只有逐 ID 完全相等时才会以 completed
 状态落盘，因而不将“能运行”误作观测等价性。Probe、Collector、Writer 与 Runner 已完成
 CPU 小模型/构造输入验证；真实 GPU 长轨迹验收仍需单独记录。
+
+完成 B1 运行后，可用 `scripts/analyze_page_rco.py` 对完成状态的 run 生成一个新的、
+不覆盖原工件的 JSON 报告。RCO 仅在两步都具有完整 k 个有效 Page、且
+`N_s >= k`、`N_t > k` 时计算；无效比较保留 `valid_pair_count=0`，绝不以零代替。
+对 RULER 运行，`scripts/validate_b1_ruler.py` 从已保存的 generated IDs 解码并检查
+冻结的 `reference_answer`；它只生成新的验证报告，不会重新运行模型或修改 B1 工件。
