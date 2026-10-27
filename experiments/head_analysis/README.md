@@ -10,14 +10,20 @@
 head_analysis/
 ├── runtime/                  # 模型运行期、只读的捕获与生命周期关联
 │   └── attention_probe.py    # Llama/SDPA Attention function 边界 Probe
+├── collectors/               # 在线基础统计与 Top-K/Page 聚合
+│   └── attention_stats.py    # 分块精确 Softmax，输出紧凑 CPU 记录
+├── storage/                  # NPZ/JSON 落盘与完整性校验
+│   └── trace_writer.py       # 原子分片写入、manifest、跨层/Step 校验
+├── runners/                  # 固定输入的 B1 推理编排
+│   └── b1_runner.py          # Manifest 校验、Greedy Decode、组件串联
 ├── scripts/                  # 可直接执行的准备、下载和 smoke 脚本
 ├── tests/                    # 面向 runtime 与 scripts 的 CPU 回归测试
 └── README.md
 ```
 
-## B1 后续扩展位置
+## B1 职责边界
 
-目录仅在其首个实现加入时创建，避免空目录和未经实现的接口成为伪承诺。
+尚未实现的目录仅在其首个实现加入时创建，避免空目录和未经实现的接口成为伪承诺。
 
 | 目录 | 负责内容 | 不负责内容 |
 | --- | --- | --- |
@@ -39,5 +45,6 @@ head_analysis/
 from experiments.head_analysis.runtime.attention_probe import AttentionProbe
 ```
 
-它仍仅支持 Llama 的 `sdpa` 后端、batch size 1 和完整 Prefill 后的单 Token Decode；
-Collector、Writer、Runner 与真实 GPU 验收尚未实现。
+当前 B1 原型仅支持 Llama 的 `sdpa` 后端、batch size 1 和完整 Prefill 后的单 Token
+Decode。Probe、Collector、Writer 与 Runner 已完成 CPU 小模型/构造输入验证；真实 GPU
+验收尚未完成。
