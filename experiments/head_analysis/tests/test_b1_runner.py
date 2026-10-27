@@ -7,6 +7,7 @@ import torch
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from experiments.head_analysis.runners import b1_runner
+from experiments.head_analysis.runners import baseline_decode
 
 
 class TinyTokenizer:
@@ -76,6 +77,7 @@ def test_runner_uses_frozen_ids_and_writes_probe_collector_trace(tmp_path, monke
         decode_chunk_steps=128,
         decode_cap=None,
         seed=0,
+        verify_baseline=None,
     )
 
     assert b1_runner.run_collection(args) == 0
@@ -88,6 +90,102 @@ def test_runner_uses_frozen_ids_and_writes_probe_collector_trace(tmp_path, monke
     metadata = json.loads((sample_dir / "sample_metadata.json").read_text())
     assert metadata["status"] == "completed"
     assert metadata["decode_trace_length"] == 2
+
+
+def test_runner_requires_exact_ids_from_independent_baseline(tmp_path, monkeypatch):
+    record = make_record()
+    input_path = tmp_path / "prompts.jsonl"
+    input_path.write_text(json.dumps(record) + "\n")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"data_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest()}))
+    model = make_model()
+    baseline_output = model.generate(torch.tensor([record["input_ids"]]), max_new_tokens=3, do_sample=False)[
+        0, 4:
+    ].tolist()
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "headkv-baseline-decode-v1",
+                "status": "completed",
+                "fixed_dataset": {
+                    "data_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                    "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                },
+                "model": "unused",
+                "tokenizer": "unused",
+                "generation": {"do_sample": False, "num_beams": 1, "use_cache": True, "decode_cap": None},
+                "samples": [
+                    {
+                        "sample_id": record["sample_id"],
+                        "input_sha256": record["input_sha256"],
+                        "prompt_length": 4,
+                        "generation_max_new_tokens_requested": 3,
+                        "generated_ids": baseline_output,
+                        "generated_ids_sha256": b1_runner.generated_ids_sha256(baseline_output),
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(b1_runner.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: TinyTokenizer())
+    monkeypatch.setattr(b1_runner, "load_model", lambda *args, **kwargs: (model, torch.device("cpu")))
+    args = Namespace(
+        input=str(input_path),
+        manifest=str(manifest_path),
+        tokenizer="unused",
+        model="unused",
+        run_dir=str(tmp_path / "run"),
+        sample_id=[record["sample_id"]],
+        device="cpu",
+        dtype="float32",
+        key_block_size=2,
+        prefill_window=2,
+        token_topk=5,
+        save_token_topk=True,
+        page_size=2,
+        page_topk=3,
+        decode_chunk_steps=128,
+        decode_cap=None,
+        seed=0,
+        verify_baseline=str(baseline_path),
+    )
+
+    assert b1_runner.run_collection(args) == 0
+    metadata = json.loads((tmp_path / "run" / "samples" / record["sample_id"] / "sample_metadata.json").read_text())
+    assert metadata["baseline_verification"]["exact_generated_ids_match"] is True
+
+
+def test_baseline_runner_persists_no_probe_generated_ids(tmp_path, monkeypatch):
+    record = make_record()
+    input_path = tmp_path / "prompts.jsonl"
+    input_path.write_text(json.dumps(record) + "\n")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"data_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest()}))
+    model = make_model()
+    monkeypatch.setattr(baseline_decode.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: TinyTokenizer())
+    monkeypatch.setattr(baseline_decode, "load_model", lambda *args, **kwargs: (model, torch.device("cpu")))
+    output_path = tmp_path / "baseline.json"
+    args = Namespace(
+        input=str(input_path),
+        manifest=str(manifest_path),
+        tokenizer="unused",
+        model="unused",
+        output=str(output_path),
+        sample_id=[record["sample_id"]],
+        device="cpu",
+        dtype="float32",
+        decode_cap=None,
+        seed=0,
+    )
+
+    assert baseline_decode.run_baseline(args) == 0
+    output = json.loads(output_path.read_text())
+    assert output["schema_version"] == baseline_decode.BASELINE_SCHEMA_VERSION
+    assert output["samples"][0]["input_sha256"] == record["input_sha256"]
+    assert output["samples"][0]["generated_ids_sha256"] == b1_runner.generated_ids_sha256(
+        output["samples"][0]["generated_ids"]
+    )
 
 
 def test_frozen_selection_rejects_manifest_mismatch(tmp_path):

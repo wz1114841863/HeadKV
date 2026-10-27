@@ -42,6 +42,16 @@ def input_ids_sha256(ids: Sequence[int]) -> str:
     return sha256_bytes(json.dumps(list(ids), separators=(",", ":")).encode("utf-8"))
 
 
+def generated_ids_sha256(ids: Sequence[int]) -> str:
+    """Hash generated IDs in the same uint32 little-endian encoding as the writer."""
+
+    try:
+        payload = b"".join(int(token_id).to_bytes(4, "little", signed=False) for token_id in ids)
+    except (OverflowError, ValueError) as exc:
+        raise B1RunnerError("generated token IDs must fit unsigned uint32") from exc
+    return sha256_bytes(payload)
+
+
 def iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
     with path.open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
@@ -191,10 +201,92 @@ def generation_stop_reason(generated_ids: Sequence[int], requested_budget: int, 
     return "stopped_without_eos"
 
 
+def load_verified_baseline(
+    baseline_path: Path,
+    *,
+    selected: Sequence[dict[str, Any]],
+    manifest: dict[str, Any],
+    manifest_path: Path,
+    model_path: str,
+    tokenizer_path: str,
+    decode_cap: int | None,
+) -> tuple[dict[str, dict[str, Any]], str]:
+    """Load an independent no-Probe generation artifact for exact ID comparison."""
+
+    try:
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise B1RunnerError(f"baseline JSON parse error: {baseline_path}: {exc}") from exc
+    if not isinstance(baseline, dict) or baseline.get("schema_version") != "headkv-baseline-decode-v1":
+        raise B1RunnerError("baseline has an unsupported schema_version")
+    if baseline.get("status") != "completed":
+        raise B1RunnerError("baseline status is not completed")
+    fixed_dataset = baseline.get("fixed_dataset")
+    if not isinstance(fixed_dataset, dict):
+        raise B1RunnerError("baseline is missing fixed_dataset provenance")
+    if fixed_dataset.get("data_sha256") != manifest["data_sha256"]:
+        raise B1RunnerError("baseline data_sha256 differs from the selected frozen manifest")
+    if fixed_dataset.get("manifest_sha256") != sha256_bytes(manifest_path.read_bytes()):
+        raise B1RunnerError("baseline manifest_sha256 differs from the selected manifest")
+    if baseline.get("model") != str(model_path) or baseline.get("tokenizer") != str(tokenizer_path):
+        raise B1RunnerError("baseline model or tokenizer path differs from this collection run")
+    generation = baseline.get("generation")
+    expected_generation = {"do_sample": False, "num_beams": 1, "use_cache": True, "decode_cap": decode_cap}
+    if not isinstance(generation, dict) or any(
+        generation.get(key) != value for key, value in expected_generation.items()
+    ):
+        raise B1RunnerError("baseline generation settings differ from this collection run")
+    entries = baseline.get("samples")
+    if not isinstance(entries, list):
+        raise B1RunnerError("baseline samples is not a list")
+    by_id: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("sample_id"), str):
+            raise B1RunnerError("baseline contains a malformed sample entry")
+        sample_id = entry["sample_id"]
+        if sample_id in by_id:
+            raise B1RunnerError(f"baseline contains duplicate sample_id {sample_id}")
+        generated_ids = entry.get("generated_ids")
+        if not isinstance(generated_ids, list) or any(
+            isinstance(value, bool) or not isinstance(value, int) for value in generated_ids
+        ):
+            raise B1RunnerError(f"baseline {sample_id}: generated_ids is not a list of integers")
+        if entry.get("generated_ids_sha256") != generated_ids_sha256(generated_ids):
+            raise B1RunnerError(f"baseline {sample_id}: generated_ids_sha256 does not match IDs")
+        by_id[sample_id] = entry
+    for record in selected:
+        sample_id = record["sample_id"]
+        entry = by_id.get(sample_id)
+        if entry is None:
+            raise B1RunnerError(f"baseline is missing selected sample_id {sample_id}")
+        budget = requested_generation_budget(record, decode_cap)
+        if (
+            entry.get("input_sha256") != record["input_sha256"]
+            or entry.get("prompt_length") != frozen_length(record)
+            or entry.get("generation_max_new_tokens_requested") != budget
+        ):
+            raise B1RunnerError(f"baseline {sample_id}: frozen-input or generation-budget provenance differs")
+        if len(entry["generated_ids"]) > budget:
+            raise B1RunnerError(f"baseline {sample_id}: generated IDs exceed the requested budget")
+    return by_id, sha256_bytes(baseline_path.read_bytes())
+
+
 def run_collection(args: argparse.Namespace) -> int:
     input_path = Path(args.input)
     manifest_path = Path(args.manifest)
     selected, manifest = load_frozen_selection(input_path, manifest_path, args.sample_id)
+    baseline_entries: dict[str, dict[str, Any]] | None = None
+    baseline_sha256: str | None = None
+    if args.verify_baseline is not None:
+        baseline_entries, baseline_sha256 = load_verified_baseline(
+            Path(args.verify_baseline),
+            selected=selected,
+            manifest=manifest,
+            manifest_path=manifest_path,
+            model_path=args.model,
+            tokenizer_path=args.tokenizer,
+            decode_cap=args.decode_cap,
+        )
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, local_files_only=True, use_fast=True)
     model, device = load_model(args.model, args.device, args.dtype)
     num_layers, num_query_heads, num_kv_heads = model_dimensions(model)
@@ -245,6 +337,11 @@ def run_collection(args: argparse.Namespace) -> int:
             "device": str(device),
             "dtype": args.dtype,
             "generation": {"do_sample": False, "num_beams": 1, "use_cache": True},
+            "baseline_verification": (
+                None
+                if baseline_entries is None
+                else {"path": str(args.verify_baseline), "sha256": baseline_sha256, "mode": "exact_generated_ids"}
+            ),
         },
         config_snapshot={
             "schema_version": schema.schema_version,
@@ -260,6 +357,7 @@ def run_collection(args: argparse.Namespace) -> int:
             "selected_sample_ids": list(args.sample_id),
             "decode_cap": args.decode_cap,
             "seed": args.seed,
+            "verify_baseline": None if baseline_entries is None else str(args.verify_baseline),
         },
     )
 
@@ -323,11 +421,47 @@ def run_collection(args: argparse.Namespace) -> int:
         if output.ndim != 2 or output.shape[0] != 1 or not torch.equal(output[0, :prompt_length], input_tensor[0]):
             raise B1RunnerError("generation output does not preserve the frozen input prefix")
         generated_ids = output[0, prompt_length:].tolist()
+        baseline_metadata: dict[str, Any] | None = None
+        if baseline_entries is not None:
+            expected_ids = baseline_entries[record["sample_id"]]["generated_ids"]
+            exact_match = generated_ids == expected_ids
+            baseline_metadata = {
+                "path": str(args.verify_baseline),
+                "sha256": baseline_sha256,
+                "expected_generated_ids_sha256": generated_ids_sha256(expected_ids),
+                "observed_generated_ids_sha256": generated_ids_sha256(generated_ids),
+                "expected_generated_length": len(expected_ids),
+                "observed_generated_length": len(generated_ids),
+                "exact_generated_ids_match": exact_match,
+            }
+            if not exact_match:
+                failure_metadata = sample_metadata(record, attention_backend="sdpa", requested_budget=budget)
+                failure_metadata["baseline_verification"] = baseline_metadata
+                failure_metadata["error"] = "generated IDs differ from the independent no-Probe baseline"
+                writer.write_sample(
+                    SampleWriteRequest(
+                        sample_metadata=failure_metadata,
+                        generated_ids=[],
+                        prefill_records=[],
+                        decode_records=[],
+                        eos_reached=False,
+                        generation_stop_reason="baseline_mismatch",
+                        status="failed",
+                    )
+                )
+                failures += 1
+                resource_records.append(
+                    {"sample_id": record["sample_id"], "status": "failed", "elapsed_seconds": elapsed}
+                )
+                continue
         prefill_records = [item for item in collected_records if item.phase.value == "prefill"]
         decode_records = [item for item in collected_records if item.phase.value == "decode"]
+        completed_metadata = sample_metadata(record, attention_backend="sdpa", requested_budget=budget)
+        if baseline_metadata is not None:
+            completed_metadata["baseline_verification"] = baseline_metadata
         writer.write_sample(
             SampleWriteRequest(
-                sample_metadata=sample_metadata(record, attention_backend="sdpa", requested_budget=budget),
+                sample_metadata=completed_metadata,
                 generated_ids=generated_ids,
                 prefill_records=prefill_records,
                 decode_records=decode_records,
@@ -371,6 +505,10 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--page-topk", type=int, default=32)
     parser.add_argument("--decode-chunk-steps", type=int, default=128)
     parser.add_argument("--decode-cap", type=int, help="explicit temporary cap recorded in metadata; never implicit")
+    parser.add_argument(
+        "--verify-baseline",
+        help="completed baseline_decode.py JSON; require byte-exact generated IDs before accepting traces",
+    )
     parser.add_argument("--seed", type=int, default=0)
     return parser
 

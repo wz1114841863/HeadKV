@@ -15,6 +15,7 @@ head_analysis/
 ├── storage/                  # NPZ/JSON 落盘与完整性校验
 │   └── trace_writer.py       # 原子分片写入、manifest、跨层/Step 校验
 ├── runners/                  # 固定输入的 B1 推理编排
+│   ├── baseline_decode.py    # 无 Probe 的 Greedy ID 基线工件
 │   └── b1_runner.py          # Manifest 校验、Greedy Decode、组件串联
 ├── scripts/                  # 可直接执行的准备、下载和 smoke 脚本
 ├── tests/                    # 面向 runtime 与 scripts 的 CPU 回归测试
@@ -46,5 +47,8 @@ from experiments.head_analysis.runtime.attention_probe import AttentionProbe
 ```
 
 当前 B1 原型仅支持 Llama 的 `sdpa` 后端、batch size 1 和完整 Prefill 后的单 Token
-Decode。Probe、Collector、Writer 与 Runner 已完成 CPU 小模型/构造输入验证；真实 GPU
-验收尚未完成。
+Decode。长 Decode 验收先运行 `runners/baseline_decode.py`，它会用相同冻结
+`input_ids` 保存无 Probe 的完整生成 ID；随后给 `b1_runner.py` 传入
+`--verify-baseline <artifact.json>`。采集结果只有逐 ID 完全相等时才会以 completed
+状态落盘，因而不将“能运行”误作观测等价性。Probe、Collector、Writer 与 Runner 已完成
+CPU 小模型/构造输入验证；真实 GPU 长轨迹验收仍需单独记录。
