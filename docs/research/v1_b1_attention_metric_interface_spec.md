@@ -548,6 +548,22 @@ $$
 
 超预算时依次排查 Tensor 引用/重复计算 → 调整 Key Block → 优化 Writer → **显式关闭可选 Token Top-K** 或诊断权重 → 缩小试运行规模/优化实现。不能静默改变 Page 排名、Page 双 Scope、核心统计或 Decode 观测频率。
 
+资源记录采用 `headkv-resource-measurement-v1` 契约。每条 Baseline/B1 样本必须记录：
+
+- `generation_end_to_end_seconds`：包围 `model.generate` 和样本末尾 CUDA 同步的 Host wall
+  time，不含 B1 Trace 写盘；旧字段 `elapsed_seconds` 保留为同一数值的兼容别名。
+- `forward_timing`：标准 Greedy 路径的第一个根模型 `forward` 为 Prefill，后续根模型
+  `forward` 为 Decode；CUDA 使用同一设备流上的成对 Event，在样本边界同步后得到 Prefill
+  时间及 Decode 的总时间、均值、最小/最大、p50/p95（线性插值）。它不包含 Python 生成控制、
+  token 选择或写盘。CPU 仅以 `perf_counter` 作为回归测试后备，不作为 GPU 性能数据。
+- B1 额外记录 `trace_write_wall_seconds`，以及 `trace_storage` 中的样本逻辑数组字节数和
+  实际样本文件字节数。该字节数不含会在每次写样本后更新的运行级 Manifest；逻辑数组字节数是
+  未压缩 NumPy 数组字节数。
+
+资源记录必须同时保存其计时方法、Scope、Forward 数量及不完整 Forward 数。标准成功样本须
+满足 `Prefill forward=1`、`Decode forward=max(0, generated_length-1)`；不满足时不得把该
+资源记录当作可比较的 B1 标准生成测量。
+
 ## 9. B1 正确性验证与验收
 
 ### 9.1 CPU 数学与数值测试

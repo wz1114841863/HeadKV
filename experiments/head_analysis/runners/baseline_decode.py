@@ -33,6 +33,11 @@ from experiments.head_analysis.runners.b1_runner import (
     requested_generation_budget,
     sha256_bytes,
 )
+from experiments.head_analysis.runners.resource_metrics import (
+    GenerationPhaseTimer,
+    measurement_contract,
+    validate_standard_greedy_timing,
+)
 
 
 BASELINE_SCHEMA_VERSION = "headkv-baseline-decode-v1"
@@ -86,7 +91,8 @@ def run_baseline(args: argparse.Namespace) -> int:
             torch.cuda.reset_peak_memory_stats(device)
             torch.cuda.synchronize(device)
         started = time.perf_counter()
-        with torch.inference_mode():
+        phase_timer = GenerationPhaseTimer(model, device)
+        with phase_timer, torch.inference_mode():
             output = model.generate(
                 input_ids=input_tensor,
                 attention_mask=torch.ones_like(input_tensor),
@@ -103,6 +109,8 @@ def run_baseline(args: argparse.Namespace) -> int:
         if output.ndim != 2 or output.shape[0] != 1 or not torch.equal(output[0, :prompt_length], input_tensor[0]):
             raise B1RunnerError("generation output does not preserve the frozen input prefix")
         generated_ids = output[0, prompt_length:].tolist()
+        timing = phase_timer.summary()
+        validate_standard_greedy_timing(timing, len(generated_ids))
         entry: dict[str, Any] = {
             "sample_id": record["sample_id"],
             "input_sha256": record["input_sha256"],
@@ -112,6 +120,8 @@ def run_baseline(args: argparse.Namespace) -> int:
             "generated_ids_sha256": generated_ids_sha256(generated_ids),
             "generation_stop_reason": generation_stop_reason(generated_ids, budget, eos_ids),
             "elapsed_seconds": elapsed,
+            "generation_end_to_end_seconds": elapsed,
+            "forward_timing": timing,
         }
         if device.type == "cuda":
             entry["peak_memory_allocated_bytes"] = int(torch.cuda.max_memory_allocated(device))
@@ -135,6 +145,7 @@ def run_baseline(args: argparse.Namespace) -> int:
         "device": str(device),
         "dtype": args.dtype,
         "generation": {"do_sample": False, "num_beams": 1, "use_cache": True, "decode_cap": args.decode_cap},
+        "resource_measurement": measurement_contract(),
         "seed": args.seed,
         "samples": sample_entries,
     }

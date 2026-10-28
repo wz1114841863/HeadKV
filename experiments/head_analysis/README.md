@@ -16,7 +16,8 @@ head_analysis/
 │   └── trace_writer.py       # 原子分片写入、manifest、跨层/Step 校验
 ├── runners/                  # 固定输入的 B1 推理编排
 │   ├── baseline_decode.py    # 无 Probe 的 Greedy ID 基线工件
-│   └── b1_runner.py          # Manifest 校验、Greedy Decode、组件串联
+│   ├── b1_runner.py          # Manifest 校验、Greedy Decode、组件串联
+│   └── resource_metrics.py   # Prefill/Decode 前向计时与资源记录契约
 ├── analysis/                 # 完成工件的只读离线分析
 │   └── page_rco.py           # 双 Scope、k/Δ 敏感性 Page RCO
 ├── scripts/                  # 可直接执行的准备、下载和 smoke 脚本
@@ -60,3 +61,15 @@ CPU 小模型/构造输入验证；真实 GPU 长轨迹验收仍需单独记录�
 `N_s >= k`、`N_t > k` 时计算；无效比较保留 `valid_pair_count=0`，绝不以零代替。
 对 RULER 运行，`scripts/validate_b1_ruler.py` 从已保存的 generated IDs 解码并检查
 冻结的 `reference_answer`；它只生成新的验证报告，不会重新运行模型或修改 B1 工件。
+
+## 资源计量边界
+
+`runners/resource_metrics.py` 由 Baseline 与 B1 Runner 共同使用。它在标准 Greedy
+生成中将第一个根模型 `forward` 记为 Prefill、其后每个根模型 `forward` 记为 Decode；CUDA
+使用同一设备流上的 Event，并在样本边界同步后报告 Decode 的总时间、均值、p50/p95、最小和
+最大值。CPU 回归测试使用 `perf_counter`，不应把它当作 GPU 性能结果。
+
+每条样本另保存：`generation_end_to_end_seconds`（包围 `model.generate` 的 host wall time，
+不含 B1 写盘）、峰值显存，以及 B1 的 `trace_write_wall_seconds`、样本逻辑数组字节数和
+实际样本文件字节数。根模型前向时间不包含 Python 生成控制、token 选择或写盘；这些范围不得
+混为吞吐量或硬件加速结论。

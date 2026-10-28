@@ -90,6 +90,13 @@ def test_runner_uses_frozen_ids_and_writes_probe_collector_trace(tmp_path, monke
     metadata = json.loads((sample_dir / "sample_metadata.json").read_text())
     assert metadata["status"] == "completed"
     assert metadata["decode_trace_length"] == 2
+    resource = json.loads((tmp_path / "run" / "run_metadata.json").read_text())["resource_summary"]["per_sample"][0]
+    assert resource["generation_end_to_end_seconds"] >= 0
+    assert resource["forward_timing"]["prefill"]["count"] == 1
+    assert resource["forward_timing"]["decode"]["count"] == 2
+    assert resource["trace_write_wall_seconds"] >= 0
+    assert resource["trace_storage"]["logical_array_bytes"] > 0
+    assert resource["trace_storage"]["artifact_file_bytes"] > 0
 
 
 def test_runner_requires_exact_ids_from_independent_baseline(tmp_path, monkeypatch):
@@ -186,6 +193,10 @@ def test_baseline_runner_persists_no_probe_generated_ids(tmp_path, monkeypatch):
     assert output["samples"][0]["generated_ids_sha256"] == b1_runner.generated_ids_sha256(
         output["samples"][0]["generated_ids"]
     )
+    assert output["resource_measurement"]["version"] == "headkv-resource-measurement-v1"
+    timing = output["samples"][0]["forward_timing"]
+    assert timing["prefill"]["count"] == 1
+    assert timing["decode"]["count"] == 2
 
 
 def test_frozen_selection_rejects_manifest_mismatch(tmp_path):

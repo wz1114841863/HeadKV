@@ -116,6 +116,24 @@ class SampleWriteRequest:
     status: str = "completed"
 
 
+@dataclass(frozen=True)
+class SampleWriteResult:
+    """Byte accounting for one successfully materialized sample artifact."""
+
+    sample_id: str
+    artifact_file_count: int
+    logical_array_bytes: int
+    artifact_file_bytes: int
+
+    def to_dict(self) -> dict[str, int | str]:
+        return {
+            "sample_id": self.sample_id,
+            "artifact_file_count": self.artifact_file_count,
+            "logical_array_bytes": self.logical_array_bytes,
+            "artifact_file_bytes": self.artifact_file_bytes,
+        }
+
+
 class AttentionTraceWriter:
     """Write one run's B1 traces with sample isolation and manifest hashes."""
 
@@ -174,7 +192,7 @@ class AttentionTraceWriter:
         self._write_json_and_register("run_metadata.json", metadata)
         self._write_manifest()
 
-    def write_sample(self, request: SampleWriteRequest) -> None:
+    def write_sample(self, request: SampleWriteRequest) -> SampleWriteResult:
         """Validate and atomically write one sample without rewriting the prompt."""
 
         self._require_initialized()
@@ -252,6 +270,12 @@ class AttentionTraceWriter:
         for entry in local_entries:
             self._manifest_entries[entry["relative_path"]] = entry
         self._write_manifest()
+        return SampleWriteResult(
+            sample_id=sample_id,
+            artifact_file_count=len(local_entries),
+            logical_array_bytes=sum(int(entry["logical_array_bytes"]) for entry in local_entries),
+            artifact_file_bytes=sum(int(entry["file_bytes"]) for entry in local_entries),
+        )
 
     def _assemble_prefill(
         self, records: Sequence[CollectedAttention], sample_id: str, *, required: bool

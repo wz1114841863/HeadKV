@@ -23,6 +23,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from experiments.head_analysis.collectors.attention_stats import AttentionCollectorConfig, AttentionStatsCollector
 from experiments.head_analysis.runtime.attention_probe import AttentionProbe
+from experiments.head_analysis.runners.resource_metrics import (
+    GenerationPhaseTimer,
+    measurement_contract,
+    validate_standard_greedy_timing,
+)
 from experiments.head_analysis.storage.trace_writer import (
     AttentionTraceSchema,
     AttentionTraceWriter,
@@ -337,6 +342,7 @@ def run_collection(args: argparse.Namespace) -> int:
             "device": str(device),
             "dtype": args.dtype,
             "generation": {"do_sample": False, "num_beams": 1, "use_cache": True},
+            "resource_measurement": measurement_contract(),
             "baseline_verification": (
                 None
                 if baseline_entries is None
@@ -375,12 +381,13 @@ def run_collection(args: argparse.Namespace) -> int:
             torch.cuda.reset_peak_memory_stats(device)
             torch.cuda.synchronize(device)
         started = time.perf_counter()
+        phase_timer = GenerationPhaseTimer(model, device)
         try:
 
             def collect_callback(context) -> None:
                 collected_records.append(collector.collect(context))
 
-            with AttentionProbe(
+            with phase_timer, AttentionProbe(
                 sample_id=record["sample_id"], prompt_length=prompt_length, on_attention=collect_callback
             )(model):
                 output = model.generate(
@@ -398,6 +405,7 @@ def run_collection(args: argparse.Namespace) -> int:
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             elapsed = time.perf_counter() - started
+            timing = phase_timer.summary()
             failure_metadata = sample_metadata(record, attention_backend="sdpa", requested_budget=budget)
             failure_metadata["error"] = f"{type(exc).__name__}: {exc}"
             writer.write_sample(
@@ -412,7 +420,15 @@ def run_collection(args: argparse.Namespace) -> int:
                 )
             )
             failures += 1
-            resource_records.append({"sample_id": record["sample_id"], "status": "failed", "elapsed_seconds": elapsed})
+            resource_records.append(
+                {
+                    "sample_id": record["sample_id"],
+                    "status": "failed",
+                    "elapsed_seconds": elapsed,
+                    "generation_end_to_end_seconds": elapsed,
+                    "forward_timing": timing,
+                }
+            )
             continue
 
         if device.type == "cuda":
@@ -421,6 +437,8 @@ def run_collection(args: argparse.Namespace) -> int:
         if output.ndim != 2 or output.shape[0] != 1 or not torch.equal(output[0, :prompt_length], input_tensor[0]):
             raise B1RunnerError("generation output does not preserve the frozen input prefix")
         generated_ids = output[0, prompt_length:].tolist()
+        timing = phase_timer.summary()
+        validate_standard_greedy_timing(timing, len(generated_ids))
         baseline_metadata: dict[str, Any] | None = None
         if baseline_entries is not None:
             expected_ids = baseline_entries[record["sample_id"]]["generated_ids"]
@@ -451,7 +469,13 @@ def run_collection(args: argparse.Namespace) -> int:
                 )
                 failures += 1
                 resource_records.append(
-                    {"sample_id": record["sample_id"], "status": "failed", "elapsed_seconds": elapsed}
+                    {
+                        "sample_id": record["sample_id"],
+                        "status": "failed",
+                        "elapsed_seconds": elapsed,
+                        "generation_end_to_end_seconds": elapsed,
+                        "forward_timing": timing,
+                    }
                 )
                 continue
         prefill_records = [item for item in collected_records if item.phase.value == "prefill"]
@@ -459,7 +483,8 @@ def run_collection(args: argparse.Namespace) -> int:
         completed_metadata = sample_metadata(record, attention_backend="sdpa", requested_budget=budget)
         if baseline_metadata is not None:
             completed_metadata["baseline_verification"] = baseline_metadata
-        writer.write_sample(
+        write_started = time.perf_counter()
+        write_result = writer.write_sample(
             SampleWriteRequest(
                 sample_metadata=completed_metadata,
                 generated_ids=generated_ids,
@@ -469,17 +494,37 @@ def run_collection(args: argparse.Namespace) -> int:
                 generation_stop_reason=generation_stop_reason(generated_ids, budget, eos_ids),
             )
         )
+        write_elapsed = time.perf_counter() - write_started
         successes += 1
-        resource = {"sample_id": record["sample_id"], "status": "completed", "elapsed_seconds": elapsed}
+        resource = {
+            "sample_id": record["sample_id"],
+            "status": "completed",
+            "elapsed_seconds": elapsed,
+            "generation_end_to_end_seconds": elapsed,
+            "forward_timing": timing,
+            "trace_write_wall_seconds": write_elapsed,
+            "trace_storage": write_result.to_dict(),
+        }
         if device.type == "cuda":
             resource["peak_memory_allocated_bytes"] = int(torch.cuda.max_memory_allocated(device))
             resource["peak_memory_reserved_bytes"] = int(torch.cuda.max_memory_reserved(device))
         resource_records.append(resource)
 
     final_status = "completed" if failures == 0 else "failed" if successes == 0 else "partial"
+    completed_storage = [
+        entry["trace_storage"] for entry in resource_records if entry.get("status") == "completed"
+    ]
     writer.finalize(
         status=final_status,
-        resource_summary={"samples_completed": successes, "samples_failed": failures, "per_sample": resource_records},
+        resource_summary={
+            "samples_completed": successes,
+            "samples_failed": failures,
+            "per_sample": resource_records,
+            "completed_trace_storage_totals": {
+                "logical_array_bytes": sum(int(entry["logical_array_bytes"]) for entry in completed_storage),
+                "artifact_file_bytes": sum(int(entry["artifact_file_bytes"]) for entry in completed_storage),
+            },
+        },
     )
     return 0 if failures == 0 else 1
 
