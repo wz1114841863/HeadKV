@@ -84,35 +84,35 @@ storage:
   save_generated_ids: true
 ```
 
-每个样本先运行同配置 Baseline，再运行 B1，并要求生成 ID 完全一致。计时方法必须为
-`cuda_event`；成功样本必须满足 `Prefill forward=1`、
-`Decode forward=generated_length-1`、Trace Step 从 0 连续至末尾。仅以相同配置的工件做
-资源比较，禁止把 `flash_attention_2`、不同模型快照或不同 Token Top-K 设置并入本冻结组。
+每个样本先运行同配置 Baseline,再运行 B1,并要求生成 ID 完全一致.计时方法必须为
+`cuda_event`;成功样本必须满足 `Prefill forward=1`/
+`Decode forward=generated_length-1`/Trace Step 从 0 连续至末尾.仅以相同配置的工件做
+资源比较,禁止把 `flash_attention_2`/不同模型快照或不同 Token Top-K 设置并入本冻结组.
 
-## 5. 7.5 批次预算、预检与停止条件
+## 5. 7.5 批次预算/预检与停止条件
 
 ### 5.1 分层试运行输入
 
-本批共 10 条，目的在于覆盖数据集与长度，而不是给出数据集平均性能或质量结论：
+本批共 10 条,目的在于覆盖数据集与长度,而不是给出数据集平均性能或质量结论:
 
 | 组别 | 固定样本 |
 |---|---|
-| RULER 8K / 32K | `ruler_8k_001`、`ruler_32k_001` |
-| GovReport 8K | `govreport_8k_001`、`govreport_8k_002` |
-| GovReport 16K | `govreport_16k_001`、`govreport_16k_002` |
-| PG19 8K | `pg19_001_8k`、`pg19_003_8k` |
-| PG19 32K | `pg19_001_32k`、`pg19_003_32k` |
+| RULER 8K / 32K | `ruler_8k_001`/`ruler_32k_001` |
+| GovReport 8K | `govreport_8k_001`/`govreport_8k_002` |
+| GovReport 16K | `govreport_16k_001`/`govreport_16k_002` |
+| PG19 8K | `pg19_001_8k`/`pg19_003_8k` |
+| PG19 32K | `pg19_001_32k`/`pg19_003_32k` |
 
-PG19 的 `001_8k` 自然 EOS 较早，`003_8k` 与 `003_32k` 已有高重复告警；保留它们是为了
-验证真实异常样本的 Trace 与资源路径。它们不能单独支持“高质量长续写”的结论。
+PG19 的 `001_8k` 自然 EOS 较早,`003_8k` 与 `003_32k` 已有高重复告警;保留它们是为了
+验证真实异常样本的 Trace 与资源路径.它们不能单独支持"高质量长续写"的结论.
 
 ### 5.2 预检
 
-1. 确认目标 GPU 没有其他计算进程，且可用显存不少于 32 GiB；实际 GPU 编号写入元数据。
-2. 确认运行盘可用空间不少于 200 GiB；每次运行使用新的 `run_id`，不覆盖 7.2/7.3 工件。
-3. 使用 `experiments.head_analysis.scripts.prepare_b1_pilot` 生成新且不可覆盖的计划 JSON；
-   它校验代码提交、冻结集 Manifest、模型快照、`sdpa`、BF16 与第 4 节配置，并在计划中写出
-   精确的 Baseline/B1 参数。Baseline 完成并通过后才启动同批 B1。
+1. 确认目标 GPU 没有其他计算进程,且可用显存不少于 32 GiB;实际 GPU 编号写入元数据.
+2. 确认运行盘可用空间不少于 200 GiB;每次运行使用新的 `run_id`,不覆盖 7.2/7.3 工件.
+3. 使用 `experiments.head_analysis.scripts.prepare_b1_pilot` 生成新且不可覆盖的计划 JSON;
+   它校验代码提交/冻结集 Manifest/模型快照/`sdpa`/BF16 与第 4 节配置,并在计划中写出
+   精确的 Baseline/B1 参数.Baseline 完成并通过后才启动同批 B1.
 
 ### 5.3 批次上限和审查触发
 
@@ -141,3 +141,26 @@ PG19 的 `001_8k` 自然 EOS 较早，`003_8k` 与 `003_32k` 已有高重复告�
    产物保留方案，并经审阅批准。
 
 在此之前，本报告仅冻结执行边界，不冻结“稳定 Head”类别、PG19 质量或硬件性能结论。
+
+## 7. 7.5 完成记录与后续边界
+
+2026-10-29，冻结的 10 条分层试运行已在单张 A100 的 `cuda:4` 完成。运行目录为远端
+`data/runs/b1_step7_pilot10_20261029_v1/`；该目录是远端实验数据，不进入 Git。其计划文件
+记录的固定集 SHA-256 为
+`30ea0f8a85e203c8cf63a87e83805e851345c42a2a2fd9ab7f4dbdc1c63492ee`，运行代码提交为
+`39ffea1c385dde665c581d4b8b51ecca64edf9ad`，远端未跟踪的 `data/` 不构成代码差异。
+
+- 10 条均完成，Baseline/B1 generated IDs 完全一致，90 个 Trace 工件哈希与大小均通过；
+- 每条满足 `Decode forward = generated_length - 1`，Decode Step 从 0 连续至末尾；
+- 两条 RULER 均检索到参考答案 `4694634`；
+- 累计 B1 生成时间为 9,023.73 s，实际 Trace 为 1,616,137,493 B；单样本最大 reserved
+  为 29,534,191,616 B，最大逻辑数组为 464,617,452 B，最大实际 Trace 为 248,078,585 B，
+  最大写盘时间为 51.03 s，均未触发第 5.3 节停止线；
+- `pg19_003_32k` 在 `k=32, Δ=1` 下的两个 Scope、全部 256 个 Layer/KV-head 记录各有
+  1,022 个有效 RCO 配对。
+
+原始 Trace 暂保留，以支持后续离线多尺度分析；此前被这 10 条覆盖的早期试运行 Trace 已
+清理。上述结果满足第 6 节的前三项条件，但**不构成全量执行授权**。全量运行的批次、
+失败恢复、运行集合和保留规则由
+[`v1_b1_full_run_plan_v1.md`](v1_b1_full_run_plan_v1.md) 单独定义，须经审核后才能生成
+任何全量批次计划或启动模型。

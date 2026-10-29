@@ -13,8 +13,11 @@
 **当前状态:** 100 条固定 Prompt 已准备完成并通过数据校验。已在
 `experiments/head_analysis/runtime/attention_probe.py` 实现仅内存捕获的 Llama/SDPA
 `AttentionProbe` 原型、在线指标 Collector、分片 Writer、固定输入 ExperimentRunner 及
-CPU 小模型/构造输入回归测试；真实 GPU 验收尚未完成。基础指标与数据接口由
-[《V1-B1 Attention 指标定义与数据接口规范》](v1_b1_attention_metric_interface_spec.md) 单独冻结。
+CPU 小模型/构造输入回归测试；2026-10-29 已完成 10 条分层 GPU 试运行，验证 B1/ Baseline
+ID 一致性、Trace 完整性、资源上限与长 Decode 双 Scope RCO。全量 100 条尚未获执行批准，
+须先审核[《V1-B1 全量 100 条运行计划与运行集合接口》](v1_b1_full_run_plan_v1.md)。基础指标
+与数据接口由[《V1-B1 Attention 指标定义与数据接口规范》](v1_b1_attention_metric_interface_spec.md)
+单独冻结。
 
 ---
 
@@ -629,9 +632,10 @@ B1 开发完成的标准:
 
 先对两条 8K 固定 Prompt 测量资源开销，再对少量 16K/32K 输入确认长上下文可行性。随后
 根据实测值冻结配置、批次预算和停止条件；当前冻结见
-[`v1_b1_resource_budget_v1.md`](v1_b1_resource_budget_v1.md)。只有该文件批准的小规模
-分层试运行完成并经新的资源审查，才可提出全量 100 条运行，而不是将单样本成功外推为
-全量资源可行。
+[`v1_b1_resource_budget_v1.md`](v1_b1_resource_budget_v1.md)。该文批准的 10 条分层试运行
+已完成并通过独立核验。全量 100 条的批次、恢复与运行集合约定见
+[`v1_b1_full_run_plan_v1.md`](v1_b1_full_run_plan_v1.md)，仍须经审核批准；不得将单样本或
+分层试运行成功直接外推为全量资源可行。
 
 ### 阶段 B2：Prefill 一致性及跨阶段分析
 
