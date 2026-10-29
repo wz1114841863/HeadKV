@@ -60,9 +60,10 @@ fixed_dataset:
   manifest: data/fixed_v2/manifest.json
   required_data_sha256: 30ea0f8a85e203c8cf63a87e83805e851345c42a2a2fd9ab7f4dbdc1c63492ee
 model:
-  revision: 7d9030db2ebd5310ba1486306449e5d0d4a05676
   dtype: bfloat16
   attention_backend: sdpa
+code:
+  expected_commit: supplied explicitly to the immutable 7.5 preflight plan
 generation:
   do_sample: false
   num_beams: 1
@@ -109,8 +110,9 @@ PG19 的 `001_8k` 自然 EOS 较早，`003_8k` 与 `003_32k` 已有高重复告�
 
 1. 确认目标 GPU 没有其他计算进程，且可用显存不少于 32 GiB；实际 GPU 编号写入元数据。
 2. 确认运行盘可用空间不少于 200 GiB；每次运行使用新的 `run_id`，不覆盖 7.2/7.3 工件。
-3. 校验代码提交、冻结集 Manifest、模型快照、`sdpa`、BF16 与第 4 节配置；Baseline 完成并
-   通过后才启动同批 B1。
+3. 使用 `experiments.head_analysis.scripts.prepare_b1_pilot` 生成新且不可覆盖的计划 JSON；
+   它校验代码提交、冻结集 Manifest、模型快照、`sdpa`、BF16 与第 4 节配置，并在计划中写出
+   精确的 Baseline/B1 参数。Baseline 完成并通过后才启动同批 B1。
 
 ### 5.3 批次上限和审查触发
 

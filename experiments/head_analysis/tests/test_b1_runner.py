@@ -208,3 +208,37 @@ def test_frozen_selection_rejects_manifest_mismatch(tmp_path):
 
     with pytest.raises(b1_runner.B1RunnerError, match="checksum"):
         b1_runner.load_frozen_selection(input_path, manifest_path, [record["sample_id"]])
+
+
+def test_resource_budget_reports_only_post_sample_threshold_violations():
+    records = [
+        {
+            "sample_id": "first",
+            "status": "completed",
+            "generation_end_to_end_seconds": 3.0,
+            "peak_memory_reserved_bytes": 10,
+            "trace_write_wall_seconds": 1.0,
+            "trace_storage": {"logical_array_bytes": 20, "artifact_file_bytes": 30},
+        },
+        {
+            "sample_id": "second",
+            "status": "completed",
+            "generation_end_to_end_seconds": 4.0,
+            "peak_memory_reserved_bytes": 10,
+            "trace_write_wall_seconds": 1.0,
+            "trace_storage": {"logical_array_bytes": 20, "artifact_file_bytes": 30},
+        },
+    ]
+    limits = {
+        "max_batch_generation_seconds": 6.0,
+        "max_batch_artifact_file_bytes": 100,
+        "max_sample_peak_reserved_bytes": 11,
+        "max_sample_logical_array_bytes": 21,
+        "max_sample_artifact_file_bytes": 31,
+        "max_sample_trace_write_seconds": 2.0,
+    }
+
+    assert b1_runner.resource_budget_violations(records[:1], limits) == []
+    assert b1_runner.resource_budget_violations(records, limits) == [
+        "batch_generation_seconds: observed 7.0 exceeds limit 6.0"
+    ]

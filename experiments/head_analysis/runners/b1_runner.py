@@ -16,7 +16,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -37,6 +37,74 @@ from experiments.head_analysis.storage.trace_writer import (
 
 class B1RunnerError(RuntimeError):
     """Raised when the fixed-input B1 execution contract is violated."""
+
+
+def resource_budget_limits(args: argparse.Namespace) -> dict[str, float | int | None]:
+    """Return explicitly requested pilot limits; ``None`` means no limit."""
+
+    return {
+        "max_batch_generation_seconds": getattr(args, "max_batch_generation_seconds", None),
+        "max_batch_artifact_file_bytes": getattr(args, "max_batch_artifact_file_bytes", None),
+        "max_sample_peak_reserved_bytes": getattr(args, "max_sample_peak_reserved_bytes", None),
+        "max_sample_logical_array_bytes": getattr(args, "max_sample_logical_array_bytes", None),
+        "max_sample_artifact_file_bytes": getattr(args, "max_sample_artifact_file_bytes", None),
+        "max_sample_trace_write_seconds": getattr(args, "max_sample_trace_write_seconds", None),
+    }
+
+
+def resource_budget_violations(
+    resource_records: Sequence[dict[str, Any]], limits: Mapping[str, float | int | None]
+) -> list[str]:
+    """Return post-sample budget violations without mutating recorded evidence."""
+
+    completed = [entry for entry in resource_records if entry.get("status") == "completed"]
+    if not completed:
+        return []
+    latest = completed[-1]
+    violations: list[str] = []
+
+    def exceed(name: str, observed: float | int | None, limit: float | int | None) -> None:
+        if limit is None:
+            return
+        if observed is None:
+            violations.append(f"{name}: missing observed value for configured limit {limit}")
+        elif observed > limit:
+            violations.append(f"{name}: observed {observed} exceeds limit {limit}")
+
+    exceed(
+        "sample_peak_memory_reserved_bytes",
+        latest.get("peak_memory_reserved_bytes"),
+        limits["max_sample_peak_reserved_bytes"],
+    )
+    storage = latest.get("trace_storage")
+    if not isinstance(storage, dict):
+        storage = {}
+    exceed(
+        "sample_logical_array_bytes",
+        storage.get("logical_array_bytes"),
+        limits["max_sample_logical_array_bytes"],
+    )
+    exceed(
+        "sample_artifact_file_bytes",
+        storage.get("artifact_file_bytes"),
+        limits["max_sample_artifact_file_bytes"],
+    )
+    exceed(
+        "sample_trace_write_seconds",
+        latest.get("trace_write_wall_seconds"),
+        limits["max_sample_trace_write_seconds"],
+    )
+    exceed(
+        "batch_generation_seconds",
+        sum(float(entry["generation_end_to_end_seconds"]) for entry in completed),
+        limits["max_batch_generation_seconds"],
+    )
+    exceed(
+        "batch_artifact_file_bytes",
+        sum(int(entry.get("trace_storage", {}).get("artifact_file_bytes", 0)) for entry in completed),
+        limits["max_batch_artifact_file_bytes"],
+    )
+    return violations
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -370,6 +438,8 @@ def run_collection(args: argparse.Namespace) -> int:
     successes = 0
     failures = 0
     resource_records: list[dict[str, Any]] = []
+    limits = resource_budget_limits(args)
+    budget_stop: dict[str, Any] | None = None
     eos_ids = eos_token_ids(model, tokenizer)
     for record in selected:
         budget = requested_generation_budget(record, args.decode_cap)
@@ -429,6 +499,8 @@ def run_collection(args: argparse.Namespace) -> int:
                     "forward_timing": timing,
                 }
             )
+            if getattr(args, "stop_on_failure", False):
+                break
             continue
 
         if device.type == "cuda":
@@ -477,6 +549,8 @@ def run_collection(args: argparse.Namespace) -> int:
                         "forward_timing": timing,
                     }
                 )
+                if getattr(args, "stop_on_failure", False):
+                    break
                 continue
         prefill_records = [item for item in collected_records if item.phase.value == "prefill"]
         decode_records = [item for item in collected_records if item.phase.value == "decode"]
@@ -509,8 +583,13 @@ def run_collection(args: argparse.Namespace) -> int:
             resource["peak_memory_allocated_bytes"] = int(torch.cuda.max_memory_allocated(device))
             resource["peak_memory_reserved_bytes"] = int(torch.cuda.max_memory_reserved(device))
         resource_records.append(resource)
+        violations = resource_budget_violations(resource_records, limits)
+        if violations:
+            resource["budget_violations"] = violations
+            budget_stop = {"after_sample_id": record["sample_id"], "violations": violations}
+            break
 
-    final_status = "completed" if failures == 0 else "failed" if successes == 0 else "partial"
+    final_status = "completed" if failures == 0 and budget_stop is None else "failed" if successes == 0 else "partial"
     completed_storage = [
         entry["trace_storage"] for entry in resource_records if entry.get("status") == "completed"
     ]
@@ -524,9 +603,11 @@ def run_collection(args: argparse.Namespace) -> int:
                 "logical_array_bytes": sum(int(entry["logical_array_bytes"]) for entry in completed_storage),
                 "artifact_file_bytes": sum(int(entry["artifact_file_bytes"]) for entry in completed_storage),
             },
+            "budget_limits": limits,
+            "budget_stop": budget_stop,
         },
     )
-    return 0 if failures == 0 else 1
+    return 0 if failures == 0 and budget_stop is None else 1
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -554,6 +635,13 @@ def make_parser() -> argparse.ArgumentParser:
         "--verify-baseline",
         help="completed baseline_decode.py JSON; require byte-exact generated IDs before accepting traces",
     )
+    parser.add_argument("--max-batch-generation-seconds", type=float)
+    parser.add_argument("--max-batch-artifact-file-bytes", type=int)
+    parser.add_argument("--max-sample-peak-reserved-bytes", type=int)
+    parser.add_argument("--max-sample-logical-array-bytes", type=int)
+    parser.add_argument("--max-sample-artifact-file-bytes", type=int)
+    parser.add_argument("--max-sample-trace-write-seconds", type=float)
+    parser.add_argument("--stop-on-failure", action="store_true", help="preserve completed traces and stop later samples")
     parser.add_argument("--seed", type=int, default=0)
     return parser
 
@@ -562,6 +650,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = make_parser().parse_args(argv)
     if args.decode_cap is not None and args.decode_cap <= 0:
         raise SystemExit("--decode-cap must be positive")
+    for name in (
+        "max_batch_generation_seconds",
+        "max_batch_artifact_file_bytes",
+        "max_sample_peak_reserved_bytes",
+        "max_sample_logical_array_bytes",
+        "max_sample_artifact_file_bytes",
+        "max_sample_trace_write_seconds",
+    ):
+        if getattr(args, name) is not None and getattr(args, name) <= 0:
+            raise SystemExit(f"--{name.replace('_', '-')} must be positive")
     try:
         raise SystemExit(run_collection(args))
     except (B1RunnerError, FileNotFoundError, ValueError) as exc:

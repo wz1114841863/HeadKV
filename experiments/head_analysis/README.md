@@ -17,6 +17,7 @@ head_analysis/
 ├── runners/                  # 固定输入的 B1 推理编排
 │   ├── baseline_decode.py    # 无 Probe 的 Greedy ID 基线工件
 │   ├── b1_runner.py          # Manifest 校验、Greedy Decode、组件串联
+│   ├── pilot_preflight.py    # 冻结 Pilot 的资源/版本预检与启动参数
 │   └── resource_metrics.py   # Prefill/Decode 前向计时与资源记录契约
 ├── analysis/                 # 完成工件的只读离线分析
 │   └── page_rco.py           # 双 Scope、k/Δ 敏感性 Page RCO
@@ -73,3 +74,19 @@ CPU 小模型/构造输入验证；真实 GPU 长轨迹验收仍需单独记录�
 不含 B1 写盘）、峰值显存，以及 B1 的 `trace_write_wall_seconds`、样本逻辑数组字节数和
 实际样本文件字节数。根模型前向时间不包含 Python 生成控制、token 选择或写盘；这些范围不得
 混为吞吐量或硬件加速结论。
+
+## 7.5 Pilot 运行前检查
+
+`scripts/prepare_b1_pilot.py` 固定 10 条 Pilot 输入和当前 B1 配置。它在不加载模型的前提下
+检查冻结集、精确 Git 提交、模型/Tokenizer 快照、目标 GPU 的空闲显存和计算进程、运行盘空间
+以及所有输出路径尚不存在；通过后只写出一个不可覆盖的 JSON 启动计划。计划中的 Baseline 与
+B1 参数可以直接用于远端 tmux 运行，其中 B1 会携带批次预算和 `--stop-on-failure`。
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.prepare_b1_pilot \
+  --input data/fixed_v2/prompts.jsonl --manifest data/fixed_v2/manifest.json \
+  --model <local-model-snapshot> --tokenizer <local-model-snapshot> \
+  --device cuda:N --expected-commit <exact-headkv-commit> \
+  --baseline-output data/runs/<run-id>.baseline.json \
+  --run-dir data/runs/<run-id> --output data/runs/<run-id>.plan.json
+```
