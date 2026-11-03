@@ -26,18 +26,24 @@ V1方案计划参看: docs/research/research_plan_v1.md
 
 ## V1-B1 当前进展
 
-2026-10-29 至 2026-10-30 已完成 100 条固定输入的 B1 正式采集、Baseline/B1 一致性与
-工件完整性核验，以及双 Scope、多 k、多 Δ 的 Page RCO 离线计算。当前已得到 Page 时间
-稳定性随 Δ 衰减、不同 Layer/KV Head 稳定性明显异质、Head 排名在 GovReport/PG19 及
-不同长度间较一致的描述性证据。
+2026-10-29 至 2026-11-03 已完成 100 条固定输入的 B1 正式采集、Baseline/B1 一致性、
+原始工件核验及完整 CPU 离线分析。分析覆盖 Query/Page 基础统计、双 Scope 多 k/多 Δ
+Page RCO、Token Top-K 稳定性、样本/Pair Bootstrap、GQA 对齐关联、Layer 去中心化关系和
+跨任务/长度 Head 身份比较。
 
-完整运行来源、派生报告 Hash、统计方法、主要结果、论文对应边界与下一阶段计划见：
-[《V1-B1 全量采集与 Page RCO 初步分析结果》](v1_b1_full_analysis_results_v1.md)。
+权威完成包位于远端：
 
-当前状态不是 B1 全部研究完成：Entropy、Top-K Mass、位置/距离、Token Top-K 与 RCO 的
-联合分析及样本级统计不确定性尚未完成；CateKV Prefill CV 属于后续 B2，不能由当前结果
-替代。
+```text
+data/analysis/b1_full_100_completed_20261103_v2/
+```
 
-B1 后续离线分析的样本权重、统计单位、Token Top-K 稳定性、GQA 映射、派生工件和代码接口
-见：[《V1-B1 离线分析指标与汇总接口规范》](v1_b1_offline_analysis_spec_v1.md)。当前为待审核
-草案，审核前不据此生成正式分析工件。
+其 completed Manifest SHA-256 为
+`e1b0b4fc89b50b7979458b6416dd9b203e046320bdab3c503f7666854f59fd0d`。完整运行来源、阶段
+工件 Hash、统计结果、图表、论文对应边界和未验证事项见：
+[《V1-B1 全量采集与完整离线分析结果》](v1_b1_full_analysis_results_v1.md)。
+
+当前证据支持固定模型内 Page/Token 时间稳定性异质性、跨条件 Head 身份一致性及二者的显著
+关联；不支持固定二值 Head 分类、CateKV Prefill-to-Decode 预测或任何系统效率收益。离线
+口径与接口见[《V1-B1 离线分析指标与汇总接口规范》](v1_b1_offline_analysis_spec_v1.md)，
+该规范已执行完成并冻结。下一阶段需另行审核 B2 或连续稳定性干预实验，不能静默扩展 B1
+结论。

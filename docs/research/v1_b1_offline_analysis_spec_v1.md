@@ -2,7 +2,7 @@
 
 ## 1. 状态、目的与边界
 
-**状态：v1 已审核冻结；正在按第 12 节分阶段实现，尚未生成正式全量分析工件。**
+**状态：v1 已审核冻结并执行完成；正式全量分析工件与结果报告已通过验收。**
 
 本文冻结 V1-B1 全量 Trace 的离线读取、聚合、统计不确定性、派生工件和函数接口。它承接
 [《V1-B1 Attention 指标定义与数据接口规范》](v1_b1_attention_metric_interface_spec.md)
@@ -36,7 +36,7 @@ data/runs/b1_full_100_20261029_v1.manifest.json
 
 其固定数据 SHA-256、代码提交、模型、生成和采集配置以运行集合 Manifest 为权威。当前已
 完成的 Page RCO 报告及 Hash 记录于
-[《V1-B1 全量采集与 Page RCO 初步分析结果》](v1_b1_full_analysis_results_v1.md)。
+[《V1-B1 全量采集与完整离线分析结果》](v1_b1_full_analysis_results_v1.md)。
 
 离线工具不得根据目录名猜测数据集、长度或配对关系。`sample_id`、`dataset`、`task`、
 `pair_id`、Prompt 长度和生成长度必须来自冻结输入 Manifest 与样本元数据，并交叉核验。
@@ -472,50 +472,31 @@ write_analysis_bundle_new(output_dir, plan, outputs) -> AnalysisManifest
 
 ### 12.1 当前实现进度
 
-第 1 项已完成本地代码与构造工件验收：`analysis/b1_offline.py` 实现只读 Run Set 索引、
-冻结样本/PG19 pair 映射、Schema、文件集合/Hash、样本元数据、生成长度和 Decode 分片检查，
-并校验每批 Page RCO 坐标；同时提供样本等权主聚合、明确命名的 observation-weighted
-敏感性聚合，以及分析计划/完成 Manifest 的纯构造接口。`scripts/analyze_b1_run_set.py` 仅在
-来源全部通过后创建新目录和 `analysis_plan.json`，并核对分析代码为指定的干净 Git HEAD；
-此阶段不会创建 completed Manifest，也没有读取远端正式 100 条工件。
+第 1～5 项均已实现并通过构造数据回归、来源失败关闭检查及正式 100 条远端运行。Stage 3、
+Stage 4、Stage 5 分别保留独立 `partial` Manifest；`scripts/finalize_b1_analysis.py` 再次核验
+三阶段计划、Manifest、输出 Hash 和共同来源后，组装数值 JSON/NPZ、CSV 和只读取冻结数值的
+图表，最后才写入唯一的 `status=completed` Manifest。
 
-第 2 项核心汇总也已完成本地构造验收：`summarize_query_and_page_metrics` 单次读取每条 Trace，
-返回 Query Head 28 项标量和 KV Head 双 Scope Page Mass、Top-32 Coverage、Scope 有效率；
-样本内同时保留 mean/median/P10/P90/有效数，条件级 Profile 对样本均值等权。Decode 四分段
-严格使用第 4.3 节公式且只接受 `C>=32`，短轨迹保持空值。读取时重新核验 Entropy、Top-Mass、
-Prompt/Generated Mass、Distance Mass、Page Mass/Coverage 的范围、单调性、和约束与 NaN
-规则。当前只形成 Python/NumPy 汇总对象，尚未写正式远端数值工件。
+正式完成包为：
 
-第 3 项已完成本地构造验收：`aggregate_page_rco` 在固定
-`(condition,layer,kv_head,scope,k,delta)` 上分别生成样本等权主 Profile 与
-`valid_pair_count` 加权敏感性 Profile；条件级标量先在单一样本内等权汇总 Head，再使用固定
-PCG64 seed 对样本执行 2,000 次 Bootstrap。PG19 按冻结 `pair_id` 输出 `32K-8K` 的 Head 与
-标量配对差异及 pair-level Bootstrap CI。`--run-stage3` 只创建
-`stage3_profiles.npz`、`stage3_summary.json` 和 `status=partial` 的
-`stage3_manifest.json`；不得创建正式 completed Manifest。
+```text
+data/analysis/b1_full_100_completed_20261103_v2/
+```
 
-第 4 项已完成本地构造验收：`analysis/token_stability.py` 对已保存 Top-64 位置计算
-`k={16,32,64}` 与九档 Δ 的精确集合重合、Token RCO、更替率均值/P90、共同 Token 的归一化
-Rank 位移及逻辑年龄中位数/P90。实现按 Step 分块执行精确 `k×k` 比较，不保存 Step-pair
-明细；Sentinel、重复位置、候选不足、越过可见位置和零共同 Token 均有独立测试。条件级结果
-按样本等权并使用冻结 Bootstrap 参数，PG19 输出 `32K-8K` pair-level 差异。远端入口只写
-`stage4_token_profiles.npz`、`stage4_token_summary.json` 和 `status=partial` 的
-`stage4_manifest.json`，仍不创建 completed Manifest。
+其 `analysis_manifest.json` SHA-256 为
+`e1b0b4fc89b50b7979458b6416dd9b203e046320bdab3c503f7666854f59fd0d`，登记 16 个输出、
+100 条样本和六个条件。首个 v1 完成包因跨条件热力图排版与 RULER 长 Δ 无效对角线的展示
+问题被版本化保留；v2 的 NPZ/CSV 与 v1 逐字节一致，只修正图表并作为权威结果。
 
-第 5 项已开始实现：`analysis/metric_relationships.py` 从 Stage3/Stage4 NPZ 恢复样本级
-Profile，执行四对一 GQA 聚合、样本级 Bootstrap、全模型/Layer 去中心化/逐 Layer 相关以及
-Page/Token 稳定性的跨条件 Head 身份比较。`--run-stage5` 在读取数值前重新核验两个 partial
-Manifest、计划与所有消费文件 Hash，只写 `stage5_relationship_profiles.npz`、
-`stage5_relationships.json` 和 partial Manifest。当前仅完成本地构造与 CLI 回归测试，尚未
-执行 10 条 Pilot 或远端正式 100 条 Stage5，因此仍不得创建 completed Manifest。
-
-验证命令及当前结果：
+最终验证命令及结果：
 
 ```bash
 .venv/bin/python -m pytest experiments/head_analysis/tests -q
-# 56 passed
+# 57 passed
 .venv/bin/python -m compileall -q experiments/head_analysis
 ```
 
-下一验收项为第 5 项 10 条 Pilot 与远端正式 100 条关系工件；正式结果通过审查前，不得把
-阶段性工件命名为完整 B1 离线分析结果。
+完整数值、统计结果、论文对应边界和未验证事项见
+[《V1-B1 全量采集与完整离线分析结果》](v1_b1_full_analysis_results_v1.md)。本规范到此作为
+B1 已执行合同冻结；后续只增加图表或案例时不得改变其统计口径，B2 新指标必须使用新计划和
+新 Schema。

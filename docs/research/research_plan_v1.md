@@ -1,6 +1,6 @@
 # Llama Attention Head 分布特性研究__V1 实验方案报告
 
-**版本:V1.1（B1/B2 分段方案，待审核）**
+**版本:V1.2（B1 已完成，B2 待单独审核）**
 
 **基础框架:** KV-Base
 
@@ -13,12 +13,12 @@
 **当前状态:** 100 条固定 Prompt 已准备完成并通过数据校验。Llama/SDPA AttentionProbe、
 在线指标 Collector、分片 Writer、固定输入 ExperimentRunner 及 CPU 回归测试已实现。
 2026-10-29 至 2026-10-30 已完成全量 100 条 B1 GPU 采集、Baseline/B1 一致性、Trace
-完整性、资源上限和 RULER 检查，并完成双 Scope、多 k、多 Δ Page RCO 离线计算。运行来源、
-派生工件 Hash、初步统计和证据边界见
-[《V1-B1 全量采集与 Page RCO 初步分析结果》](v1_b1_full_analysis_results_v1.md)。下一阶段为
-B1 单指标、Token Top-K 和多指标关联的可复现离线分析；其第一版汇总规范见
-[《V1-B1 离线分析指标与汇总接口规范》](v1_b1_offline_analysis_spec_v1.md)，当前待审核。
-尚未进入 CateKV CV 所属的 B2。
+完整性、资源上限和 RULER 检查。2026-11-03 又完成 Query/Page 单指标、双 Scope Page RCO、
+Token Top-K 稳定性、样本级 Bootstrap、GQA 对齐关系、跨条件 Head 身份、统一数值包和首批
+图表。运行来源、派生工件 Hash、正式统计和证据边界见
+[《V1-B1 全量采集与完整离线分析结果》](v1_b1_full_analysis_results_v1.md)。离线汇总规范见
+[《V1-B1 离线分析指标与汇总接口规范》](v1_b1_offline_analysis_spec_v1.md)，已执行完成并
+冻结。尚未进入 CateKV CV 所属的 B2；B2 需单独冻结新指标和新采集 Schema。
 基础指标与数据接口由
 [《V1-B1 Attention 指标定义与数据接口规范》](v1_b1_attention_metric_interface_spec.md)
 单独冻结。

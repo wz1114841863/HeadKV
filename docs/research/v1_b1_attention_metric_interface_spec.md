@@ -4,9 +4,8 @@
 > **Schema 版本：** `headkv-v1-b1-attention-v1`
 > **研究阶段：** V1-B1（Attention 基础分布与时间演化）；V1-B2 仅预留接口
 > **模型与框架：** Llama-3.1-8B-Instruct；KV-Base；Transformers 5.2.0 作为当前代码审阅基准
-> **状态：** 指标及接口设计稿；Llama/SDPA 的只读内存捕获 Probe、基础统计 Collector、
-> 分片 Writer 与固定输入 ExperimentRunner 已完成 CPU 小模型/构造输入回归；真实 GPU
-> 验收尚未完成
+> **状态：** 指标及接口已冻结并完成真实 GPU 验收、100 条正式采集与离线分析；结果见
+> [《V1-B1 全量采集与完整离线分析结果》](v1_b1_full_analysis_results_v1.md)
 > **设计依据：** `research_plan_v1.md` 与 `v1_b1_attention_metric_interface_spec.md`，并合并逐节审阅决议
 
 **核心原则：** 固定输入与生成轨迹；在实际 Attention 调用边界只读观察；在线分块计算基础统计并紧凑落盘；离线分析 Head 空间分布和时间稳定性；不在 B1 采集完整 KV 或实现 CateKV 的 CV。B1 同时保留 `all_visible` 与 `prompt_only` 两套 Page Top-K。
