@@ -23,3 +23,21 @@
 
 ## V1实验方案设计
 V1方案计划参看: docs/research/research_plan_v1.md
+
+## V1-B1 当前进展
+
+2026-10-29 至 2026-10-30 已完成 100 条固定输入的 B1 正式采集、Baseline/B1 一致性与
+工件完整性核验，以及双 Scope、多 k、多 Δ 的 Page RCO 离线计算。当前已得到 Page 时间
+稳定性随 Δ 衰减、不同 Layer/KV Head 稳定性明显异质、Head 排名在 GovReport/PG19 及
+不同长度间较一致的描述性证据。
+
+完整运行来源、派生报告 Hash、统计方法、主要结果、论文对应边界与下一阶段计划见：
+[《V1-B1 全量采集与 Page RCO 初步分析结果》](v1_b1_full_analysis_results_v1.md)。
+
+当前状态不是 B1 全部研究完成：Entropy、Top-K Mass、位置/距离、Token Top-K 与 RCO 的
+联合分析及样本级统计不确定性尚未完成；CateKV Prefill CV 属于后续 B2，不能由当前结果
+替代。
+
+B1 后续离线分析的样本权重、统计单位、Token Top-K 稳定性、GQA 映射、派生工件和代码接口
+见：[《V1-B1 离线分析指标与汇总接口规范》](v1_b1_offline_analysis_spec_v1.md)。当前为待审核
+草案，审核前不据此生成正式分析工件。

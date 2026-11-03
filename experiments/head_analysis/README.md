@@ -20,7 +20,8 @@ head_analysis/
 │   ├── pilot_preflight.py    # 冻结 Pilot 的资源/版本预检与启动参数
 │   └── resource_metrics.py   # Prefill/Decode 前向计时与资源记录契约
 ├── analysis/                 # 完成工件的只读离线分析
-│   └── page_rco.py           # 双 Scope、k/Δ 敏感性 Page RCO
+│   ├── page_rco.py           # 双 Scope、k/Δ 敏感性 Page RCO
+│   └── b1_offline.py         # 来源门、Query/Page 汇总、通用聚合与分析清单
 ├── scripts/                  # 可直接执行的准备、下载和 smoke 脚本
 ├── tests/                    # 面向 runtime 与 scripts 的 CPU 回归测试
 └── README.md
@@ -62,6 +63,47 @@ CPU 小模型/构造输入验证；真实 GPU 长轨迹验收仍需单独记录�
 `N_s >= k`、`N_t > k` 时计算；无效比较保留 `valid_pair_count=0`，绝不以零代替。
 对 RULER 运行，`scripts/validate_b1_ruler.py` 从已保存的 generated IDs 解码并检查
 冻结的 `reference_answer`；它只生成新的验证报告，不会重新运行模型或修改 B1 工件。
+
+正式 B1 离线分析先运行 `scripts/analyze_b1_run_set.py`。当前第一阶段只读核对 Run Set、
+冻结样本、每批 Schema、Manifest 文件集合/Hash、样本元数据、Decode 分片连续性及每批
+Page RCO 坐标，成功后在全新目录中仅创建不可覆盖的 `analysis_plan.json`；它不会计算
+指标，也不会提前生成 `status=completed` 的 `analysis_manifest.json`。正式 100 条输入时
+`--expected-batches 10 --expected-samples 100` 为默认值，且必须显式记录与当前干净 `HEAD`
+完全一致的分析代码提交：
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.analyze_b1_run_set \
+  --run-set data/runs/<run-set>.manifest.json --source-root . \
+  --page-rco-report data/runs/<batch-01>.page-rco.json \
+  --page-rco-report data/runs/<batch-02>.page-rco.json \
+  --analysis-id <new-analysis-id> --analysis-git-commit <exact-commit> \
+  --output-dir data/analysis/<new-analysis-id>
+```
+
+10 个批次的 Page RCO 报告均需逐项传入。来源验证会读取并哈希全部正式 Trace，因此这是
+一次有意的完整输入门，不应把耗时误认为重新运行模型。
+
+第 2 阶段的只读核心接口为
+`summarize_query_and_page_metrics(index)`：每条 Trace 只读取一次，同时返回 Query Head 28 项
+标量和 KV Head 双 Scope Page Mass/Coverage/有效率。样本内保存 mean、median、P10、P90 和
+有效数；条件级 Profile 只对样本均值等权。Decode 仅在单样本 `C>=32` 时按其自身归一化进度
+生成四段，RULER 等短轨迹的分段数组保持 `NaN` 且有效数为零。该接口当前只返回 NumPy
+结构，尚未接入正式 completed 分析工件的 CLI。
+
+第 3 阶段的 `aggregate_page_rco` 读取既有 Page RCO 报告，在每个固定 Head 坐标上输出样本
+等权主 Profile 和 `valid_pair_count` 加权敏感性 Profile；条件级标量先在每条样本内等权汇总
+Head，再执行 PCG64 固定种子的样本级 Bootstrap。PG19 仅按冻结 `pair_id` 计算
+`32K-8K` 配对差异。CLI 增加 `--run-stage3` 后会写出 `stage3_profiles.npz`、
+`stage3_summary.json` 和 `status=partial` 的 `stage3_manifest.json`，但仍不会创建
+`analysis_manifest.json`：
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.analyze_b1_run_set \
+  <上述来源参数> --run-stage3 \
+  --bootstrap-replicates 2000 --bootstrap-seed 20261103
+```
+
+这些是第 1～3 阶段的可审计中间工件；Token 稳定性和多指标关联完成前不能标记正式分析完成。
 
 ## 资源计量边界
 
