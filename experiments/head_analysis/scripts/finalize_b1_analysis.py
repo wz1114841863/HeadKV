@@ -408,7 +408,7 @@ def _write_figures(root: Path) -> list[dict[str, Any]]:
     correlations = _read_json(root / "correlations.json", "Correlations")
     records = {record["relation_id"]: record for record in correlations["records"]}
     conditions = page["axes"]["conditions"]
-    fig, panels = plt.subplots(2, 2, figsize=(11, 9))
+    fig, panels = plt.subplots(2, 2, figsize=(12, 9), layout="constrained")
     profiles = (
         ("page_rco:all_visible:k32:d1", "Page all-visible, d=1"),
         ("page_rco:all_visible:k32:d256", "Page all-visible, d=256"),
@@ -417,13 +417,15 @@ def _write_figures(root: Path) -> list[dict[str, Any]]:
     )
     for panel, (profile, title) in zip(panels.ravel(), profiles):
         matrix = np.full((len(conditions), len(conditions)), np.nan)
-        np.fill_diagonal(matrix, 1.0)
         for i, left in enumerate(conditions):
             for j in range(i + 1, len(conditions)):
                 right = conditions[j]
                 relation_id = f"cross:{profile}:{left}__{right}"
-                if relation_id in records:
+                if relation_id in records and records[relation_id]["valid_head_count"] > 0:
                     matrix[i, j] = matrix[j, i] = records[relation_id]["spearman"]
+        for index in range(len(conditions)):
+            if np.isfinite(matrix[index]).any():
+                matrix[index, index] = 1.0
         image = panel.imshow(matrix, vmin=0, vmax=1, cmap="viridis")
         panel.set_title(title)
         panel.set_xticks(range(len(conditions)), [_condition_label(x) for x in conditions], rotation=45, ha="right")
@@ -440,6 +442,10 @@ def _write_figures(root: Path) -> list[dict[str, Any]]:
                         fontsize=6,
                         color="white" if matrix[i, j] < 0.65 else "black",
                     )
+    for panel in panels[0]:
+        panel.tick_params(labelbottom=False)
+    for panel in panels[:, 1]:
+        panel.tick_params(labelleft=False)
     fig.colorbar(image, ax=panels.ravel().tolist(), shrink=0.75, label="Spearman")
     path = root / "figures/cross_condition_head_identity.png"
     _save_figure(path, fig)
@@ -457,7 +463,8 @@ def _write_figures(root: Path) -> list[dict[str, Any]]:
             relation_id = f"within:{condition}:page_rco:all_visible:k32:d1__page_rco:all_visible:k32:d{delta}"
             short_long.append(records[relation_id]["spearman"])
         panels[0].plot((1, 32, 128, 256), token_page, marker="o", label=_condition_label(condition))
-        panels[1].plot((32, 128, 256), short_long, marker="o", label=_condition_label(condition))
+        if np.isfinite(np.asarray(short_long, dtype=np.float64)).any():
+            panels[1].plot((32, 128, 256), short_long, marker="o", label=_condition_label(condition))
     for panel, deltas in zip(panels, ((1, 32, 128, 256), (32, 128, 256))):
         _set_decode_axis(panel, deltas)
         panel.set_ylim(0, 1)
@@ -465,7 +472,9 @@ def _write_figures(root: Path) -> list[dict[str, Any]]:
     panels[0].set_title("Token RCO vs Page RCO")
     panels[0].set_ylabel("Head-profile Spearman")
     panels[1].set_title("Page d=1 vs longer horizon")
-    panels[1].legend(fontsize=7, ncol=2)
+    handles, labels = panels[1].get_legend_handles_labels()
+    if handles:
+        panels[1].legend(handles, labels, fontsize=7, ncol=2)
     path = root / "figures/stability_relationships.png"
     _save_figure(path, fig)
     plt.close(fig)
