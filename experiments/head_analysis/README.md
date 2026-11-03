@@ -76,6 +76,14 @@ B2 Pilot 入口为模块化 Runner。输入必须是已完成的 B1 Run Set，`-
 完成后用 `validate_b2_run(<run-dir>)` 独立复验，不以进程退出码代替工件验收。正式 100 条运行
 仍须等待六条 Pilot 实测后冻结资源停止线、批次和恢复方案。
 
+真实模型 Pilot 前可在目标 GPU 上运行不下载权重的 Tiny Llama 烟测；它要求无 Probe/B2 的
+逐 Forward Logits 和 Top-1 完全一致，并覆盖一次 Prefill 与两步 Decode：
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.smoke_b2_tiny_model \
+  --device cuda:N --dtype bfloat16
+```
+
 当前 B1 原型仅支持 Llama 的 `sdpa` 后端、batch size 1 和完整 Prefill 后的单 Token
 Decode。长 Decode 验收先运行 `runners/baseline_decode.py`，它会用相同冻结
 `input_ids` 保存无 Probe 的完整生成 ID；随后给 `b1_runner.py` 传入
