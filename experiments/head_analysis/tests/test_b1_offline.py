@@ -119,7 +119,7 @@ def write_trace(
             query_positions=decode_visible - 1,
             visible_token_count=decode_visible,
             scalar_features=scalar_features(decode_visible, decode_normalized),
-            token_topk_positions=np.zeros((decode_length, 1, 4, 64), dtype=np.uint32),
+            token_topk_positions=np.tile(np.arange(64, dtype=np.uint32), (decode_length, 1, 4, 1)),
             page_topk_ids_all_visible=np.zeros((decode_length, 1, 1, 32), dtype=np.uint32),
             page_topk_ids_prompt_only=np.zeros((decode_length, 1, 1, 32), dtype=np.uint32),
             page_candidate_count_all_visible=np.full(decode_length, 520, dtype=np.uint32),
@@ -484,6 +484,50 @@ def test_stage3_cli_writes_partial_bundle_without_completed_manifest(tmp_path, m
     assert partial["status"] == "partial"
     assert summary["page_rco"]["bootstrap_replicates"] == 20
     assert (output / "stage3_profiles.npz").is_file()
+    assert not (output / "analysis_manifest.json").exists()
+
+
+def test_stage4_cli_writes_token_partial_bundle_without_completed_manifest(tmp_path, monkeypatch):
+    run_set, report, _ = make_fixture(tmp_path)
+    output = tmp_path / "analysis-stage4"
+    monkeypatch.setattr(analyze_b1_run_set, "validate_analysis_git_state", lambda _: None)
+
+    assert (
+        analyze_b1_run_set.main(
+            [
+                "--run-set",
+                str(run_set),
+                "--source-root",
+                str(tmp_path),
+                "--page-rco-report",
+                str(report),
+                "--analysis-id",
+                "analysis-stage4",
+                "--analysis-git-commit",
+                "b" * 40,
+                "--output-dir",
+                str(output),
+                "--expected-batches",
+                "1",
+                "--expected-samples",
+                "2",
+                "--run-stage4",
+                "--bootstrap-replicates",
+                "20",
+                "--bootstrap-seed",
+                "17",
+                "--token-comparison-chunk-steps",
+                "1",
+            ]
+        )
+        == 0
+    )
+
+    partial = json.loads((output / "stage4_manifest.json").read_text())
+    summary = json.loads((output / "stage4_token_summary.json").read_text())
+    assert partial["status"] == "partial"
+    assert summary["axes"]["token_k"] == [16, 32, 64]
+    assert (output / "stage4_token_profiles.npz").is_file()
     assert not (output / "analysis_manifest.json").exists()
 
 

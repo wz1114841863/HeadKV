@@ -21,7 +21,8 @@ head_analysis/
 │   └── resource_metrics.py   # Prefill/Decode 前向计时与资源记录契约
 ├── analysis/                 # 完成工件的只读离线分析
 │   ├── page_rco.py           # 双 Scope、k/Δ 敏感性 Page RCO
-│   └── b1_offline.py         # 来源门、Query/Page 汇总、通用聚合与分析清单
+│   ├── b1_offline.py         # 来源门、Query/Page 汇总、通用聚合与分析清单
+│   └── token_stability.py    # Token Top-K 集合、Rank 与逻辑年龄稳定性
 ├── scripts/                  # 可直接执行的准备、下载和 smoke 脚本
 ├── tests/                    # 面向 runtime 与 scripts 的 CPU 回归测试
 └── README.md
@@ -104,6 +105,21 @@ Head，再执行 PCG64 固定种子的样本级 Bootstrap。PG19 仅按冻结 `p
 ```
 
 这些是第 1～3 阶段的可审计中间工件；Token 稳定性和多指标关联完成前不能标记正式分析完成。
+
+第 4 阶段的 `token_stability.py` 从 Decode Top-64 位置计算 `k={16,32,64}`、九档 Δ 的精确
+集合重合、Token RCO、更替率均值/P90、共同 Token Rank 位移，以及逻辑年龄中位数/P90。
+每个 Step 的 Sentinel、重复位置、候选数和可见范围均重新检查；零共同 Token 只令 Rank 位移
+为空，不会丢弃其他有效指标。条件级主结果按样本等权并执行固定种子 Bootstrap，PG19 仍按
+冻结 pair 输出 `32K-8K`。CLI 使用 `--run-stage4` 创建独立的
+`stage4_token_profiles.npz`、`stage4_token_summary.json` 和 partial Manifest：
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.analyze_b1_run_set \
+  <上述来源参数> --run-stage4 --token-comparison-chunk-steps 16 \
+  --bootstrap-replicates 2000 --bootstrap-seed 20261103
+```
+
+Token 比较采用受控 Step 分块，只保存样本/Head 汇总，不保存数亿条 Step-pair 明细。
 
 ## 资源计量边界
 

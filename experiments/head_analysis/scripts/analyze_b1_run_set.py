@@ -30,6 +30,7 @@ from experiments.head_analysis.analysis.b1_offline import (
     summarize_query_and_page_metrics,
     validate_analysis_sources,
 )
+from experiments.head_analysis.analysis.token_stability import TokenStabilitySummary, summarize_token_stability
 
 
 def validate_analysis_git_state(expected_commit: str) -> None:
@@ -259,6 +260,84 @@ def write_stage3_bundle_new(
     return partial_manifest_path
 
 
+def stage4_profile_arrays(token: TokenStabilitySummary) -> dict[str, np.ndarray]:
+    return {
+        "sample_ids": np.asarray(token.sample_ids),
+        "sample_conditions": np.asarray(token.sample_conditions),
+        "condition_names": np.asarray(token.condition_names),
+        "token_k_values": np.asarray(token.k_values, dtype=np.uint32),
+        "token_deltas": np.asarray(token.deltas, dtype=np.uint32),
+        "token_metrics": np.asarray(token.metrics),
+        "token_age_statistics": np.asarray(token.age_statistics),
+        "token_sample_head_metrics": token.sample_head_metrics,
+        "token_sample_head_valid_pair_count": token.sample_head_valid_pair_count,
+        "token_sample_head_rank_valid_pair_count": token.sample_head_rank_valid_pair_count,
+        "token_sample_head_age": token.sample_head_age,
+        "token_sample_head_age_valid_token_count": token.sample_head_age_valid_token_count,
+        "token_condition_head_sample_equal_mean": token.condition_head_sample_equal_mean,
+        "token_condition_head_valid_samples": token.condition_head_valid_samples,
+        "token_condition_age_head_sample_equal_mean": token.condition_age_head_sample_equal_mean,
+        "token_pg19_pair_ids": np.asarray(token.pg19_pair_ids),
+    }
+
+
+def stage4_summary_payload(*, analysis_id: str, token: TokenStabilitySummary) -> dict[str, Any]:
+    return {
+        "schema_version": "headkv-v1-b1-offline-stage4-v1",
+        "analysis_id": analysis_id,
+        "status": "partial",
+        "pending_stages": ["metric_relationships", "completed_manifest"],
+        "axes": {
+            "conditions": list(token.condition_names),
+            "token_k": list(token.k_values),
+            "deltas": list(token.deltas),
+            "token_metrics": list(token.metrics),
+            "age_statistics": list(token.age_statistics),
+            "ci_bounds": [0.025, 0.975],
+        },
+        "condition_scalar_sample_equal_mean": _json_array(token.condition_scalar_sample_equal_mean),
+        "condition_scalar_valid_samples": _json_array(token.condition_scalar_valid_samples),
+        "condition_scalar_bootstrap_ci": _json_array(token.condition_scalar_bootstrap_ci),
+        "pg19_pair_ids": list(token.pg19_pair_ids),
+        "pg19_difference_direction": "32k_minus_8k",
+        "pg19_pair_scalar_mean_difference": _json_array(token.pg19_pair_scalar_mean_difference_32k_minus_8k),
+        "pg19_pair_scalar_bootstrap_ci": _json_array(token.pg19_pair_scalar_bootstrap_ci),
+        "bootstrap_replicates": token.bootstrap_replicates,
+        "bootstrap_seed": token.bootstrap_seed,
+    }
+
+
+def write_stage4_bundle_new(
+    output_dir: Path | str,
+    *,
+    plan_path: Path,
+    token: TokenStabilitySummary,
+) -> Path:
+    root = Path(output_dir)
+    profiles_path = root / "stage4_token_profiles.npz"
+    summary_path = root / "stage4_token_summary.json"
+    partial_manifest_path = root / "stage4_manifest.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    write_npz_new(profiles_path, stage4_profile_arrays(token))
+    write_json_new(summary_path, stage4_summary_payload(analysis_id=plan["analysis_id"], token=token))
+    outputs = [
+        {"relative_path": path.name, "sha256": sha256_file(path), "file_bytes": path.stat().st_size}
+        for path in (profiles_path, summary_path)
+    ]
+    write_json_new(
+        partial_manifest_path,
+        {
+            "schema_version": "headkv-v1-b1-offline-stage4-manifest-v1",
+            "status": "partial",
+            "analysis_id": plan["analysis_id"],
+            "plan_sha256": sha256_file(plan_path),
+            "outputs": outputs,
+            "pending_stages": ["metric_relationships", "completed_manifest"],
+        },
+    )
+    return partial_manifest_path
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Validate frozen B1 sources and create a non-overwriting offline-analysis plan."
@@ -272,8 +351,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-batches", type=int, default=10)
     parser.add_argument("--expected-samples", type=int, default=100)
     parser.add_argument("--run-stage3", action="store_true")
+    parser.add_argument("--run-stage4", action="store_true")
     parser.add_argument("--bootstrap-replicates", type=int, default=2000)
     parser.add_argument("--bootstrap-seed", type=int, default=20261103)
+    parser.add_argument("--token-comparison-chunk-steps", type=int, default=16)
     return parser
 
 
@@ -293,6 +374,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parameters = dict(DEFAULT_ANALYSIS_PARAMETERS)
         parameters["bootstrap_replicates"] = args.bootstrap_replicates
         parameters["bootstrap_seed"] = args.bootstrap_seed
+        parameters["token_comparison_chunk_steps"] = args.token_comparison_chunk_steps
         plan = build_analysis_plan(
             index,
             validation,
@@ -302,6 +384,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         plan_path = prepare_analysis_directory_new(args.output_dir, plan)
         partial_manifest = None
+        stage4_manifest = None
         if args.run_stage3:
             query, page = summarize_query_and_page_metrics(index)
             rco = aggregate_page_rco(
@@ -317,6 +400,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 page=page,
                 rco=rco,
             )
+        if args.run_stage4:
+            token = summarize_token_stability(
+                index,
+                bootstrap_replicates=args.bootstrap_replicates,
+                bootstrap_seed=args.bootstrap_seed,
+                comparison_chunk_steps=args.token_comparison_chunk_steps,
+            )
+            stage4_manifest = write_stage4_bundle_new(
+                args.output_dir,
+                plan_path=plan_path,
+                token=token,
+            )
     except B1OfflineError as exc:
         raise SystemExit(f"B1 offline analysis preparation failed: {exc}") from exc
     print(
@@ -328,6 +423,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "condition_counts": plan["condition_counts"],
                 "analysis_plan": str(plan_path),
                 "stage3_manifest": None if partial_manifest is None else str(partial_manifest),
+                "stage4_manifest": None if stage4_manifest is None else str(stage4_manifest),
                 "completed_manifest_created": False,
             },
             ensure_ascii=False,

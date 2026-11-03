@@ -465,13 +465,21 @@ PCG64 seed 对样本执行 2,000 次 Bootstrap。PG19 按冻结 `pair_id` 输出
 `stage3_profiles.npz`、`stage3_summary.json` 和 `status=partial` 的
 `stage3_manifest.json`；不得创建正式 completed Manifest。
 
+第 4 项已完成本地构造验收：`analysis/token_stability.py` 对已保存 Top-64 位置计算
+`k={16,32,64}` 与九档 Δ 的精确集合重合、Token RCO、更替率均值/P90、共同 Token 的归一化
+Rank 位移及逻辑年龄中位数/P90。实现按 Step 分块执行精确 `k×k` 比较，不保存 Step-pair
+明细；Sentinel、重复位置、候选不足、越过可见位置和零共同 Token 均有独立测试。条件级结果
+按样本等权并使用冻结 Bootstrap 参数，PG19 输出 `32K-8K` pair-level 差异。远端入口只写
+`stage4_token_profiles.npz`、`stage4_token_summary.json` 和 `status=partial` 的
+`stage4_manifest.json`，仍不创建 completed Manifest。
+
 验证命令及当前结果：
 
 ```bash
 .venv/bin/python -m pytest experiments/head_analysis/tests -q
-# 47 passed
+# 51 passed
 .venv/bin/python -m compileall -q experiments/head_analysis
 ```
 
-下一实现项为第 4 项 Token Top-K 稳定性；当前可在远端生成第 1～3 项的阶段性只读工件，
-但第 4～5 项完成前不得把它命名为完整 B1 离线分析结果。
+下一实现项为第 5 项 GQA 对齐的多指标关联；第 4 项远端工件通过审查前，不提前开始关联分析，
+且第 5 项完成前不得把阶段性工件命名为完整 B1 离线分析结果。
