@@ -65,6 +65,12 @@ class B2RunnerError(RuntimeError):
     """Raised when replay provenance or execution differs from B2 v1."""
 
 
+def emit_progress(event: str, **fields: Any) -> None:
+    """Emit one machine-readable progress line for tmux/log observation."""
+
+    print(json.dumps({"event": event, **fields}, ensure_ascii=False, sort_keys=True), flush=True)
+
+
 @dataclass(frozen=True)
 class B1ReplaySample:
     """One frozen Prompt plus its hash-bound B1 generated-token trajectory."""
@@ -380,6 +386,7 @@ def _canonical_file_hash(path: Path) -> str:
 
 def run_collection(args: argparse.Namespace) -> int:
     source_root = Path(args.source_root).resolve()
+    emit_progress("b2_preflight_started", target_samples=len(args.sample_id))
     index = load_b1_replay_index(
         args.run_set,
         source_root=source_root,
@@ -388,7 +395,9 @@ def run_collection(args: argparse.Namespace) -> int:
     )
     _validate_execution_contract(index, args)
     samples = load_replay_samples(index, args.sample_id)
+    emit_progress("b2_provenance_validated", target_samples=len(samples))
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, local_files_only=True, use_fast=True)
+    emit_progress("b2_model_loading", model=str(args.model), device=args.device, dtype=args.dtype)
     model, device = load_model(args.model, args.device, args.dtype)
     num_layers, num_query_heads, num_kv_heads = model_dimensions(model)
     config = B2CollectorConfig(key_block_size=args.key_block_size)
@@ -449,6 +458,13 @@ def run_collection(args: argparse.Namespace) -> int:
         metadata = _sample_metadata(sample, index)
         baseline_resource: dict[str, Any] | None = None
         sample_started = time.perf_counter()
+        emit_progress(
+            "b2_sample_started",
+            sample_id=record["sample_id"],
+            prompt_length=frozen_length(record),
+            replay_length=len(sample.generated_ids),
+            verify_no_probe=bool(args.verify_no_probe),
+        )
         try:
             if args.verify_no_probe:
                 baseline_timer = GenerationPhaseTimer(model, device)
@@ -471,6 +487,11 @@ def run_collection(args: argparse.Namespace) -> int:
                     "forward_timing": baseline_timing,
                     "predicted_ids_sha256": generated_ids_sha256(baseline.all_predicted_token_ids),
                 }
+                emit_progress(
+                    "b2_no_probe_completed",
+                    sample_id=record["sample_id"],
+                    wall_seconds=round(float(baseline_resource["wall_seconds"]), 6),
+                )
 
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
@@ -522,6 +543,14 @@ def run_collection(args: argparse.Namespace) -> int:
                 resource["peak_memory_reserved_bytes"] = int(torch.cuda.max_memory_reserved(device))
             resources.append(resource)
             successes += 1
+            emit_progress(
+                "b2_sample_completed",
+                sample_id=record["sample_id"],
+                replay_wall_seconds=round(replay_wall, 6),
+                write_wall_seconds=round(write_wall, 6),
+                artifact_file_bytes=write_result.artifact_file_bytes,
+                peak_memory_reserved_bytes=resource.get("peak_memory_reserved_bytes"),
+            )
         except Exception as exc:
             failures += 1
             metadata["error"] = f"{type(exc).__name__}: {exc}"
@@ -549,6 +578,11 @@ def run_collection(args: argparse.Namespace) -> int:
                     "no_probe_replay": baseline_resource,
                 }
             )
+            emit_progress(
+                "b2_sample_failed",
+                sample_id=record["sample_id"],
+                error=metadata["error"],
+            )
             if args.stop_on_failure:
                 break
 
@@ -574,6 +608,14 @@ def run_collection(args: argparse.Namespace) -> int:
             },
             "collector_config_sha256": collector_config_sha256(config),
         },
+    )
+    emit_progress(
+        "b2_run_completed",
+        status=final_status,
+        samples_completed=successes,
+        samples_failed=failures,
+        run_wall_seconds=round(time.perf_counter() - run_started, 6),
+        run_dir=str(args.run_dir),
     )
     return 0 if final_status == "completed" else 1
 
