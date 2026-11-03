@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -298,11 +299,13 @@ def summarize_token_stability(
     bootstrap_replicates: int = 2000,
     bootstrap_seed: int = 20261103,
     comparison_chunk_steps: int = 16,
+    progress_callback: Callable[[int, int, str, float], None] | None = None,
 ) -> TokenStabilitySummary:
     ordered = [(index.samples[sample_id], batch) for batch in index.batches for sample_id in batch.sample_ids]
     sample_results: list[SampleTokenStability] = []
     conditions: list[str] = []
-    for sample, batch in ordered:
+    for sample_index, (sample, batch) in enumerate(ordered):
+        started = time.perf_counter()
         tokens, visible, positions = _load_token_trace(batch, sample.sample_id)
         sample_results.append(
             compute_token_stability(
@@ -316,6 +319,8 @@ def summarize_token_stability(
             )
         )
         conditions.append(sample.condition)
+        if progress_callback is not None:
+            progress_callback(sample_index + 1, len(ordered), sample.sample_id, time.perf_counter() - started)
     sample_metrics = np.stack([result.head_metrics for result in sample_results])
     sample_counts = np.stack([result.valid_pair_count for result in sample_results])
     sample_rank_counts = np.stack([result.rank_valid_pair_count for result in sample_results])

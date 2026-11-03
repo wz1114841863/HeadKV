@@ -401,11 +401,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 rco=rco,
             )
         if args.run_stage4:
+
+            def report_token_progress(done: int, total: int, sample_id: str, seconds: float) -> None:
+                print(
+                    json.dumps(
+                        {
+                            "event": "token_sample_completed",
+                            "completed": done,
+                            "total": total,
+                            "sample_id": sample_id,
+                            "sample_seconds": round(seconds, 3),
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+
             token = summarize_token_stability(
                 index,
                 bootstrap_replicates=args.bootstrap_replicates,
                 bootstrap_seed=args.bootstrap_seed,
                 comparison_chunk_steps=args.token_comparison_chunk_steps,
+                progress_callback=report_token_progress,
             )
             stage4_manifest = write_stage4_bundle_new(
                 args.output_dir,
