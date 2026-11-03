@@ -261,6 +261,35 @@ Token Top-K 未保存权重，因此这些指标只能描述集合/排名变化�
 每项分别按条件、Scope 和必要的 k/Δ 报告；主配置为 Page `k=32`、短期 `Δ=1`、中期
 `Δ=32`、长期 `Δ=128/256`，其余 k/Δ 用于敏感性分析。不能在查看结果后更换“主配置”。
 
+### 7.1 Stage5 精确聚合与不确定性接口
+
+Stage5 指标核心只消费已经通过 Hash 审查的 Stage3/Stage4 数值工件，不重新读取模型或重算
+在线 Attention；CLI 仍按正式输入门重新核验冻结 Run Set/Trace。两个来源必须具有完全相同的
+Run Set Hash、十个 Page RCO 报告 Hash、样本与条件
+轴、Bootstrap 参数及主 k/Δ；任一项不一致均失败关闭。
+
+Query Head 指标和 Token RCO 先在**单条样本、固定 Layer** 内按连续 GQA 映射
+`kv_head=floor(q_head/4)` 对四个 Query Head 等权平均，再对同一条件的样本等权形成
+`[Layer,Hkv]` Profile。不得先跨样本平均 Query Head 后再做结果选择，也不得用 Step 数或
+有效 Pair 数给主结果加权。Page 指标和 Page RCO 已是 KV Head 粒度，不重复执行 GQA 聚合。
+
+每条关系固定输出：
+
+- 全部 256 个 `(Layer,KV Head)` 坐标的 Spearman 主相关和 Pearson 敏感性相关；
+- 分别在每层减去该层 Head 均值后的全模型相关；
+- 32 个逐 Layer 相关及各自有效 Head 数；
+- 样本级 2,000 次 Bootstrap 的全模型和 Layer 去中心化 95% percentile CI；
+- 关系 ID、两个输入 Profile、条件、有效 Head 数和 Bootstrap 模式。
+
+同一条件内的两个指标使用同一组样本重采样索引。跨条件 Head 身份比较中，PG19 8K/32K
+按冻结 pair 联合重采样；其他条件分别独立重采样。Bootstrap 只表达输入样本变化造成的不确定
+性，Head 坐标本身不重采样，也不据 256 个 Head 计算伪独立显著性。相关不足 3 个有效 Head、
+任一侧零方差或不适用的 RULER 长 Δ 输出空值和实际有效数，不改写为零。
+
+跨条件主分析仅使用 Page/Token `k=32`、`Δ={1,32,128,256}` 的连续 Head Profile；所有
+15 个条件对均保留记录，不适用组合保持空值。该接口直接检验“同一 Head 是否跨任务保持
+Page/Token 稳定身份”，但不包含 B2 的 Prefill CV 或 Prefill-to-Decode Recall。
+
 ## 8. 跨任务排名与论文对照
 
 跨任务/长度稳定性使用连续 Head Profile 的 Spearman 相关与 Bootstrap CI。主分析不按结果
@@ -473,13 +502,20 @@ Rank 位移及逻辑年龄中位数/P90。实现按 Step 分块执行精确 `k×
 `stage4_token_profiles.npz`、`stage4_token_summary.json` 和 `status=partial` 的
 `stage4_manifest.json`，仍不创建 completed Manifest。
 
+第 5 项已开始实现：`analysis/metric_relationships.py` 从 Stage3/Stage4 NPZ 恢复样本级
+Profile，执行四对一 GQA 聚合、样本级 Bootstrap、全模型/Layer 去中心化/逐 Layer 相关以及
+Page/Token 稳定性的跨条件 Head 身份比较。`--run-stage5` 在读取数值前重新核验两个 partial
+Manifest、计划与所有消费文件 Hash，只写 `stage5_relationship_profiles.npz`、
+`stage5_relationships.json` 和 partial Manifest。当前仅完成本地构造与 CLI 回归测试，尚未
+执行 10 条 Pilot 或远端正式 100 条 Stage5，因此仍不得创建 completed Manifest。
+
 验证命令及当前结果：
 
 ```bash
 .venv/bin/python -m pytest experiments/head_analysis/tests -q
-# 51 passed
+# 56 passed
 .venv/bin/python -m compileall -q experiments/head_analysis
 ```
 
-下一实现项为第 5 项 GQA 对齐的多指标关联；第 4 项远端工件通过审查前，不提前开始关联分析，
-且第 5 项完成前不得把阶段性工件命名为完整 B1 离线分析结果。
+下一验收项为第 5 项 10 条 Pilot 与远端正式 100 条关系工件；正式结果通过审查前，不得把
+阶段性工件命名为完整 B1 离线分析结果。

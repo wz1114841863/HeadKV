@@ -531,6 +531,85 @@ def test_stage4_cli_writes_token_partial_bundle_without_completed_manifest(tmp_p
     assert not (output / "analysis_manifest.json").exists()
 
 
+def test_stage5_cli_validates_partial_sources_and_writes_relationship_bundle(tmp_path, monkeypatch):
+    run_set, report, _ = make_fixture(tmp_path)
+    stage3 = tmp_path / "analysis-stage3"
+    stage4 = tmp_path / "analysis-stage4"
+    stage5 = tmp_path / "analysis-stage5"
+    monkeypatch.setattr(analyze_b1_run_set, "validate_analysis_git_state", lambda _: None)
+    common = [
+        "--run-set",
+        str(run_set),
+        "--source-root",
+        str(tmp_path),
+        "--page-rco-report",
+        str(report),
+        "--analysis-git-commit",
+        "b" * 40,
+        "--expected-batches",
+        "1",
+        "--expected-samples",
+        "2",
+        "--bootstrap-replicates",
+        "10",
+        "--bootstrap-seed",
+        "17",
+    ]
+    assert (
+        analyze_b1_run_set.main(
+            common
+            + [
+                "--analysis-id",
+                "analysis-stage3",
+                "--output-dir",
+                str(stage3),
+                "--run-stage3",
+            ]
+        )
+        == 0
+    )
+    assert (
+        analyze_b1_run_set.main(
+            common
+            + [
+                "--analysis-id",
+                "analysis-stage4",
+                "--output-dir",
+                str(stage4),
+                "--run-stage4",
+                "--token-comparison-chunk-steps",
+                "1",
+            ]
+        )
+        == 0
+    )
+    assert (
+        analyze_b1_run_set.main(
+            common
+            + [
+                "--analysis-id",
+                "analysis-stage5",
+                "--output-dir",
+                str(stage5),
+                "--run-stage5",
+                "--stage3-dir",
+                str(stage3),
+                "--stage4-dir",
+                str(stage4),
+            ]
+        )
+        == 0
+    )
+
+    manifest = json.loads((stage5 / "stage5_manifest.json").read_text())
+    summary = json.loads((stage5 / "stage5_relationships.json").read_text())
+    assert manifest["status"] == "partial"
+    assert manifest["pending_stages"] == ["completed_manifest"]
+    assert summary["record_count"] == 112
+    assert (stage5 / "stage5_relationship_profiles.npz").is_file()
+    assert not (stage5 / "analysis_manifest.json").exists()
+
+
 def test_analysis_git_state_requires_exact_clean_head(monkeypatch):
     class Result:
         def __init__(self, stdout):

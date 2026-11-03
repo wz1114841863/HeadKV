@@ -22,7 +22,8 @@ head_analysis/
 ├── analysis/                 # 完成工件的只读离线分析
 │   ├── page_rco.py           # 双 Scope、k/Δ 敏感性 Page RCO
 │   ├── b1_offline.py         # 来源门、Query/Page 汇总、通用聚合与分析清单
-│   └── token_stability.py    # Token Top-K 集合、Rank 与逻辑年龄稳定性
+│   ├── token_stability.py    # Token Top-K 集合、Rank 与逻辑年龄稳定性
+│   └── metric_relationships.py # GQA 对齐、指标关联与跨条件 Head 身份
 ├── scripts/                  # 可直接执行的准备、下载和 smoke 脚本
 ├── tests/                    # 面向 runtime 与 scripts 的 CPU 回归测试
 └── README.md
@@ -120,6 +121,23 @@ Head，再执行 PCG64 固定种子的样本级 Bootstrap。PG19 仅按冻结 `p
 ```
 
 Token 比较采用受控 Step 分块，只保存样本/Head 汇总，不保存数亿条 Step-pair 明细。
+
+第 5 阶段的 `metric_relationships.py` 只消费已经验证的 Stage3/Stage4 NPZ。Query Head 标量和
+Token RCO 先在单样本内按连续四对一 GQA 映射为 KV Head，再形成条件级样本等权 Profile；
+输出全模型、Layer 去中心化和逐 Layer 的 Spearman/Pearson 相关。PG19 跨长度使用 pair
+Bootstrap，其他跨条件比较独立重采样。CLI 会先重新核验两个 partial Manifest、计划和文件
+Hash，并在新目录写出 Stage5 partial 工件：
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.analyze_b1_run_set \
+  <上述来源参数> --run-stage5 \
+  --stage3-dir data/analysis/<validated-stage3> \
+  --stage4-dir data/analysis/<validated-stage4> \
+  --bootstrap-replicates 2000 --bootstrap-seed 20261103
+```
+
+Stage5 仍不创建 `analysis_manifest.json`；只有关系结果审查通过并组装统一数值包后，才能标记
+完整 B1 离线分析完成。
 
 ## 资源计量边界
 

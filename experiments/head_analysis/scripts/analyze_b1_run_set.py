@@ -25,10 +25,17 @@ from experiments.head_analysis.analysis.b1_offline import (
     QueryMetricSummary,
     aggregate_page_rco,
     build_analysis_plan,
+    canonical_json_sha256,
     load_completed_run_set,
     sha256_file,
     summarize_query_and_page_metrics,
     validate_analysis_sources,
+)
+from experiments.head_analysis.analysis.metric_relationships import (
+    PRIMARY_RELATION_DELTAS,
+    MetricRelationshipSummary,
+    analyze_metric_relationships,
+    load_relationship_inputs,
 )
 from experiments.head_analysis.analysis.token_stability import TokenStabilitySummary, summarize_token_stability
 
@@ -338,6 +345,199 @@ def write_stage4_bundle_new(
     return partial_manifest_path
 
 
+def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise B1OfflineError(f"unable to read {label} {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise B1OfflineError(f"{label} {path} must contain a JSON object")
+    return payload
+
+
+def _validate_partial_stage_bundle(root: Path, stage: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    plan_path = root / "analysis_plan.json"
+    manifest_path = root / f"{stage}_manifest.json"
+    plan = _read_json_object(plan_path, label=f"{stage} plan")
+    manifest = _read_json_object(manifest_path, label=f"{stage} manifest")
+    expected_schema = f"headkv-v1-b1-offline-{stage}-manifest-v1"
+    if manifest.get("schema_version") != expected_schema or manifest.get("status") != "partial":
+        raise B1OfflineError(f"{manifest_path} is not a supported partial {stage} manifest")
+    if manifest.get("analysis_id") != plan.get("analysis_id"):
+        raise B1OfflineError(f"{stage} plan and manifest analysis_id differ")
+    if manifest.get("plan_sha256") != sha256_file(plan_path):
+        raise B1OfflineError(f"{stage} plan hash differs from its manifest")
+    outputs = manifest.get("outputs")
+    if not isinstance(outputs, list) or not outputs:
+        raise B1OfflineError(f"{stage} manifest has no outputs")
+    for entry in outputs:
+        if not isinstance(entry, dict) or not isinstance(entry.get("relative_path"), str):
+            raise B1OfflineError(f"{stage} manifest contains an invalid output entry")
+        path = root / entry["relative_path"]
+        if (
+            not path.is_file()
+            or path.stat().st_size != entry.get("file_bytes")
+            or sha256_file(path) != entry.get("sha256")
+        ):
+            raise B1OfflineError(f"{stage} output does not match its manifest: {path}")
+    return plan, manifest
+
+
+def validate_relationship_sources(stage3_dir: Path | str, stage4_dir: Path | str) -> dict[str, Any]:
+    stage3_root = Path(stage3_dir).resolve()
+    stage4_root = Path(stage4_dir).resolve()
+    stage3_plan, stage3_manifest = _validate_partial_stage_bundle(stage3_root, "stage3")
+    stage4_plan, stage4_manifest = _validate_partial_stage_bundle(stage4_root, "stage4")
+    for key in ("source_schema_version", "sample_count", "condition_counts"):
+        if stage3_plan.get(key) != stage4_plan.get(key):
+            raise B1OfflineError(f"Stage3 and Stage4 plans disagree on {key}")
+    if stage3_plan.get("source_run_set", {}).get("sha256") != stage4_plan.get("source_run_set", {}).get("sha256"):
+        raise B1OfflineError("Stage3 and Stage4 plans use different frozen Run Sets")
+    stage3_reports = sorted(item.get("sha256") for item in stage3_plan.get("source_page_rco_reports", []))
+    stage4_reports = sorted(item.get("sha256") for item in stage4_plan.get("source_page_rco_reports", []))
+    if stage3_reports != stage4_reports:
+        raise B1OfflineError("Stage3 and Stage4 plans use different Page RCO reports")
+    parameter_keys = (
+        "page_k",
+        "token_k",
+        "deltas",
+        "bootstrap_replicates",
+        "bootstrap_seed",
+        "primary_weighting",
+    )
+    for key in parameter_keys:
+        if stage3_plan.get("parameters", {}).get(key) != stage4_plan.get("parameters", {}).get(key):
+            raise B1OfflineError(f"Stage3 and Stage4 plans disagree on parameter {key!r}")
+    return {
+        "stage3": {
+            "root": str(stage3_root),
+            "analysis_id": stage3_plan["analysis_id"],
+            "plan_sha256": sha256_file(stage3_root / "analysis_plan.json"),
+            "manifest_sha256": sha256_file(stage3_root / "stage3_manifest.json"),
+            "profiles_sha256": sha256_file(stage3_root / "stage3_profiles.npz"),
+        },
+        "stage4": {
+            "root": str(stage4_root),
+            "analysis_id": stage4_plan["analysis_id"],
+            "plan_sha256": sha256_file(stage4_root / "analysis_plan.json"),
+            "manifest_sha256": sha256_file(stage4_root / "stage4_manifest.json"),
+            "profiles_sha256": sha256_file(stage4_root / "stage4_token_profiles.npz"),
+        },
+        "source_run_set_sha256": stage3_plan["source_run_set"]["sha256"],
+        "source_page_rco_sha256": stage3_reports,
+        "bootstrap_replicates": stage3_plan["parameters"]["bootstrap_replicates"],
+        "bootstrap_seed": stage3_plan["parameters"]["bootstrap_seed"],
+    }
+
+
+def _estimate_payload(record: Any) -> dict[str, Any]:
+    estimate = record.estimate
+    return {
+        "relation_id": record.relation_id,
+        "family": record.family,
+        "condition_x": record.condition_x,
+        "condition_y": record.condition_y,
+        "profile_x": record.profile_x,
+        "profile_y": record.profile_y,
+        "bootstrap_mode": record.bootstrap_mode,
+        "valid_head_count": estimate.valid_head_count,
+        "spearman": _json_array(np.asarray(estimate.spearman, dtype=np.float32)),
+        "spearman_bootstrap_ci": _json_array(estimate.spearman_bootstrap_ci),
+        "pearson": _json_array(np.asarray(estimate.pearson, dtype=np.float32)),
+        "pearson_bootstrap_ci": _json_array(estimate.pearson_bootstrap_ci),
+        "layer_centered_valid_head_count": estimate.layer_centered_valid_head_count,
+        "layer_centered_spearman": _json_array(np.asarray(estimate.layer_centered_spearman, dtype=np.float32)),
+        "layer_centered_spearman_bootstrap_ci": _json_array(estimate.layer_centered_spearman_bootstrap_ci),
+        "layer_centered_pearson": _json_array(np.asarray(estimate.layer_centered_pearson, dtype=np.float32)),
+        "layer_centered_pearson_bootstrap_ci": _json_array(estimate.layer_centered_pearson_bootstrap_ci),
+        "per_layer_valid_head_count": _json_array(estimate.per_layer_valid_head_count),
+        "per_layer_spearman": _json_array(estimate.per_layer_spearman),
+        "per_layer_pearson": _json_array(estimate.per_layer_pearson),
+    }
+
+
+def stage5_profile_arrays(summary: MetricRelationshipSummary) -> dict[str, np.ndarray]:
+    records = summary.records
+    return {
+        "relation_ids": np.asarray([record.relation_id for record in records]),
+        "relation_families": np.asarray([record.family for record in records]),
+        "condition_x": np.asarray([record.condition_x for record in records]),
+        "condition_y": np.asarray([record.condition_y for record in records]),
+        "profile_x": np.asarray([record.profile_x for record in records]),
+        "profile_y": np.asarray([record.profile_y for record in records]),
+        "bootstrap_modes": np.asarray([record.bootstrap_mode for record in records]),
+        "valid_head_count": np.asarray([record.estimate.valid_head_count for record in records], dtype=np.uint32),
+        "spearman": np.asarray([record.estimate.spearman for record in records], dtype=np.float32),
+        "spearman_bootstrap_ci": np.stack([record.estimate.spearman_bootstrap_ci for record in records]),
+        "pearson": np.asarray([record.estimate.pearson for record in records], dtype=np.float32),
+        "pearson_bootstrap_ci": np.stack([record.estimate.pearson_bootstrap_ci for record in records]),
+        "layer_centered_valid_head_count": np.asarray(
+            [record.estimate.layer_centered_valid_head_count for record in records], dtype=np.uint32
+        ),
+        "layer_centered_spearman": np.asarray(
+            [record.estimate.layer_centered_spearman for record in records], dtype=np.float32
+        ),
+        "layer_centered_spearman_bootstrap_ci": np.stack(
+            [record.estimate.layer_centered_spearman_bootstrap_ci for record in records]
+        ),
+        "layer_centered_pearson": np.asarray(
+            [record.estimate.layer_centered_pearson for record in records], dtype=np.float32
+        ),
+        "layer_centered_pearson_bootstrap_ci": np.stack(
+            [record.estimate.layer_centered_pearson_bootstrap_ci for record in records]
+        ),
+        "per_layer_valid_head_count": np.stack([record.estimate.per_layer_valid_head_count for record in records]),
+        "per_layer_spearman": np.stack([record.estimate.per_layer_spearman for record in records]),
+        "per_layer_pearson": np.stack([record.estimate.per_layer_pearson for record in records]),
+    }
+
+
+def write_stage5_bundle_new(
+    output_dir: Path | str,
+    *,
+    plan_path: Path,
+    source_artifacts: Mapping[str, Any],
+    summary: MetricRelationshipSummary,
+) -> Path:
+    root = Path(output_dir)
+    profiles_path = root / "stage5_relationship_profiles.npz"
+    summary_path = root / "stage5_relationships.json"
+    manifest_path = root / "stage5_manifest.json"
+    plan = _read_json_object(plan_path, label="Stage5 plan")
+    write_npz_new(profiles_path, stage5_profile_arrays(summary))
+    write_json_new(
+        summary_path,
+        {
+            "schema_version": "headkv-v1-b1-offline-stage5-v1",
+            "analysis_id": plan["analysis_id"],
+            "status": "partial",
+            "pending_stages": ["completed_manifest"],
+            "bootstrap_replicates": summary.bootstrap_replicates,
+            "bootstrap_seed": summary.bootstrap_seed,
+            "primary_deltas": list(summary.primary_deltas),
+            "record_count": len(summary.records),
+            "records": [_estimate_payload(record) for record in summary.records],
+        },
+    )
+    outputs = [
+        {"relative_path": path.name, "sha256": sha256_file(path), "file_bytes": path.stat().st_size}
+        for path in (profiles_path, summary_path)
+    ]
+    write_json_new(
+        manifest_path,
+        {
+            "schema_version": "headkv-v1-b1-offline-stage5-manifest-v1",
+            "status": "partial",
+            "analysis_id": plan["analysis_id"],
+            "plan_sha256": sha256_file(plan_path),
+            "relationship_sources": dict(source_artifacts),
+            "outputs": outputs,
+            "pending_stages": ["completed_manifest"],
+        },
+    )
+    return manifest_path
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Validate frozen B1 sources and create a non-overwriting offline-analysis plan."
@@ -352,6 +552,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-samples", type=int, default=100)
     parser.add_argument("--run-stage3", action="store_true")
     parser.add_argument("--run-stage4", action="store_true")
+    parser.add_argument("--run-stage5", action="store_true")
+    parser.add_argument("--stage3-dir", type=Path)
+    parser.add_argument("--stage4-dir", type=Path)
     parser.add_argument("--bootstrap-replicates", type=int, default=2000)
     parser.add_argument("--bootstrap-seed", type=int, default=20261103)
     parser.add_argument("--token-comparison-chunk-steps", type=int, default=16)
@@ -371,10 +574,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             verify_trace_arrays=True,
         )
         validation = validate_analysis_sources(index, args.page_rco_report)
+        relationship_sources = None
+        if args.run_stage5:
+            if args.stage3_dir is None or args.stage4_dir is None:
+                raise B1OfflineError("--run-stage5 requires --stage3-dir and --stage4-dir")
+            relationship_sources = validate_relationship_sources(args.stage3_dir, args.stage4_dir)
+            if relationship_sources["source_run_set_sha256"] != validation.source_run_set_sha256:
+                raise B1OfflineError("Stage5 source artifacts do not belong to the requested frozen Run Set")
+            requested_reports = sorted(item["sha256"] for item in validation.page_rco_reports)
+            if relationship_sources["source_page_rco_sha256"] != requested_reports:
+                raise B1OfflineError("Stage5 source artifacts do not belong to the requested Page RCO reports")
+            if relationship_sources["bootstrap_replicates"] != args.bootstrap_replicates:
+                raise B1OfflineError("Stage5 bootstrap_replicates differs from its Stage3/Stage4 sources")
+            if relationship_sources["bootstrap_seed"] != args.bootstrap_seed:
+                raise B1OfflineError("Stage5 bootstrap_seed differs from its Stage3/Stage4 sources")
         parameters = dict(DEFAULT_ANALYSIS_PARAMETERS)
         parameters["bootstrap_replicates"] = args.bootstrap_replicates
         parameters["bootstrap_seed"] = args.bootstrap_seed
         parameters["token_comparison_chunk_steps"] = args.token_comparison_chunk_steps
+        if args.run_stage5:
+            parameters["relationship_primary_deltas"] = list(PRIMARY_RELATION_DELTAS)
+            parameters["relationship_head_granularity"] = "layer_kv_head"
+            parameters["relationship_primary_correlation"] = "spearman"
         plan = build_analysis_plan(
             index,
             validation,
@@ -382,9 +603,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             git_commit=args.analysis_git_commit,
             parameters=parameters,
         )
+        if relationship_sources is not None:
+            plan["relationship_sources"] = relationship_sources
+            plan["parameters_sha256"] = canonical_json_sha256(plan["parameters"])
         plan_path = prepare_analysis_directory_new(args.output_dir, plan)
         partial_manifest = None
         stage4_manifest = None
+        stage5_manifest = None
         if args.run_stage3:
             query, page = summarize_query_and_page_metrics(index)
             rco = aggregate_page_rco(
@@ -429,6 +654,40 @@ def main(argv: Sequence[str] | None = None) -> int:
                 plan_path=plan_path,
                 token=token,
             )
+        if args.run_stage5:
+            assert args.stage3_dir is not None and args.stage4_dir is not None and relationship_sources is not None
+            relationship_inputs = load_relationship_inputs(
+                args.stage3_dir / "stage3_profiles.npz",
+                args.stage4_dir / "stage4_token_profiles.npz",
+            )
+
+            def report_relationship_progress(done: int, total: int, relation_id: str, seconds: float) -> None:
+                print(
+                    json.dumps(
+                        {
+                            "event": "relationship_record_completed",
+                            "completed": done,
+                            "total": total,
+                            "relation_id": relation_id,
+                            "record_seconds": round(seconds, 3),
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+
+            relationships = analyze_metric_relationships(
+                relationship_inputs,
+                bootstrap_replicates=args.bootstrap_replicates,
+                bootstrap_seed=args.bootstrap_seed,
+                progress_callback=report_relationship_progress,
+            )
+            stage5_manifest = write_stage5_bundle_new(
+                args.output_dir,
+                plan_path=plan_path,
+                source_artifacts=relationship_sources,
+                summary=relationships,
+            )
     except B1OfflineError as exc:
         raise SystemExit(f"B1 offline analysis preparation failed: {exc}") from exc
     print(
@@ -441,6 +700,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "analysis_plan": str(plan_path),
                 "stage3_manifest": None if partial_manifest is None else str(partial_manifest),
                 "stage4_manifest": None if stage4_manifest is None else str(stage4_manifest),
+                "stage5_manifest": None if stage5_manifest is None else str(stage5_manifest),
                 "completed_manifest_created": False,
             },
             ensure_ascii=False,
