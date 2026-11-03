@@ -11,12 +11,16 @@ head_analysis/
 ├── runtime/                  # 模型运行期、只读的捕获与生命周期关联
 │   └── attention_probe.py    # Llama/SDPA Attention function 边界 Probe
 ├── collectors/               # 在线基础统计与 Top-K/Page 聚合
-│   └── attention_stats.py    # 分块精确 Softmax，输出紧凑 CPU 记录
+│   ├── attention_stats.py    # B1 分块精确 Softmax，输出紧凑 CPU 记录
+│   ├── prefill_consistency.py # B2 Token CV/关键集合/Decode Recall 的 CPU 参考定义
+│   └── b2_attention.py       # B2 在线 Collector 与紧凑跨阶段状态
 ├── storage/                  # NPZ/JSON 落盘与完整性校验
-│   └── trace_writer.py       # 原子分片写入、manifest、跨层/Step 校验
+│   ├── trace_writer.py       # B1 原子分片写入、manifest、跨层/Step 校验
+│   └── b2_trace_writer.py    # B2 独立 Schema、Writer 与完成工件复验
 ├── runners/                  # 固定输入的 B1 推理编排
 │   ├── baseline_decode.py    # 无 Probe 的 Greedy ID 基线工件
 │   ├── b1_runner.py          # Manifest 校验、Greedy Decode、组件串联
+│   ├── b2_runner.py          # B1 轨迹绑定、teacher-forced 回放和 B2 串联
 │   ├── pilot_preflight.py    # 冻结 Pilot 的资源/版本预检与启动参数
 │   └── resource_metrics.py   # Prefill/Decode 前向计时与资源记录契约
 ├── analysis/                 # 完成工件的只读离线分析
@@ -45,6 +49,11 @@ head_analysis/
 每个新核心模块必须在 `tests/` 增加同名测试；运行期路径优先测试输出等价、注册表/Hook
 恢复和阶段索引完整性。
 
+B2 已完成本地开发门：NumPy-only 参考定义与在线 `B2AttentionCollector` 相互核对；
+`b2_runner.py` 从完成的 B1 Run Set 按 Hash 加载 Prompt/生成 ID，执行 teacher-forced replay；
+`b2_trace_writer.py` 使用独立 Schema 原子写入，并可重新核验文件 Hash、数组、Step、Token 和
+Mass 不变量。这只说明本地链路可用，尚不能替代六条分层真实 GPU Pilot 或正式数据结论。
+
 ## 当前使用方式
 
 当前 Probe 的稳定导入路径为：
@@ -52,6 +61,20 @@ head_analysis/
 ```python
 from experiments.head_analysis.runtime.attention_probe import AttentionProbe
 ```
+
+B2 Pilot 入口为模块化 Runner。输入必须是已完成的 B1 Run Set，`--verify-no-probe` 用于 Pilot
+额外执行一次无 Probe 回放；任一 Prefill/Decode Top-1 与 B1 轨迹不一致都会使样本失败：
+
+```bash
+.venv/bin/python -m experiments.head_analysis.runners.b2_runner \
+  --run-set data/runs/b1_full_100_20261029_v1.manifest.json \
+  --source-root . --model <B1-model-snapshot> --tokenizer <B1-tokenizer-snapshot> \
+  --device cuda:N --dtype bfloat16 --run-dir data/runs/<new-b2-run-id> \
+  --sample-id <sample-id> --verify-no-probe
+```
+
+完成后用 `validate_b2_run(<run-dir>)` 独立复验，不以进程退出码代替工件验收。正式 100 条运行
+仍须等待六条 Pilot 实测后冻结资源停止线、批次和恢复方案。
 
 当前 B1 原型仅支持 Llama 的 `sdpa` 后端、batch size 1 和完整 Prefill 后的单 Token
 Decode。长 Decode 验收先运行 `runners/baseline_decode.py`，它会用相同冻结

@@ -645,6 +645,11 @@ B1 开发完成的标准:
 
 在不修改 B1 基础定义和文件 Schema 的前提下，冻结 B2 参数，增加 `CV_prefill`、
 Prefill 关键 Token 和 Prefill-to-Decode 覆盖率，并开展与 B1 时间稳定性的联合分析。
+指标公式、生成轨迹回放、独立 Schema、资源边界和验收流程见
+[`v1_b2_prefill_consistency_metric_interface_spec.md`](v1_b2_prefill_consistency_metric_interface_spec.md)。
+该规范的指标、接口和正式目标集合已经审定；CPU 参考、在线 Collector、teacher-forced
+Runner、独立 Writer/Validator 和小模型回归已经完成。正式 B2 采集仍须等待六条分层真实
+GPU Pilot 后冻结资源计划。
 
 ---
 
