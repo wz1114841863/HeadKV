@@ -139,6 +139,25 @@ Hash，并在新目录写出 Stage5 partial 工件：
 Stage5 仍不创建 `analysis_manifest.json`；只有关系结果审查通过并组装统一数值包后，才能标记
 完整 B1 离线分析完成。
 
+第 5.5 阶段使用 `scripts/finalize_b1_analysis.py` 对已经审核通过的 Stage3/4/5 partial
+Manifest、计划、数值文件和相互绑定 Hash 再次执行失败关闭校验，然后在一个全新目录中组装
+统一数值 JSON/NPZ、CSV 表格和只由这些冻结数值生成的 PNG 图表。该脚本需要可选的
+`analysis` 依赖，并且最后才写入唯一的 `status=completed` Manifest：
+
+```bash
+uv pip install --python .venv/bin/python 'matplotlib>=3.9,<4'
+.venv/bin/python -m experiments.head_analysis.scripts.finalize_b1_analysis \
+  --stage3-dir data/analysis/<validated-stage3> \
+  --stage4-dir data/analysis/<validated-stage4> \
+  --stage5-dir data/analysis/<validated-stage5> \
+  --analysis-id <new-completed-analysis-id> \
+  --analysis-git-commit <exact-clean-commit> \
+  --output-dir data/analysis/<new-completed-analysis-id>
+```
+
+完成包中的 `analysis_manifest.json` 登记每一个数值、表格、图表及其大小和 SHA-256；目录
+不可覆盖。图表只是同包数值的可视化，不是新的统计来源。
+
 ## 资源计量边界
 
 `runners/resource_metrics.py` 由 Baseline 与 B1 Runner 共同使用。它在标准 Greedy

@@ -22,6 +22,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+analysis = [
+    "matplotlib>=3.9.0,<4"
+]
 flash-attn = [
     "flash-attn"
 ]
