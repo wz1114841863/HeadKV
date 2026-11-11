@@ -3,11 +3,7 @@ import json
 import numpy as np
 import pytest
 
-from experiments.head_analysis.collectors.b2_attention import (
-    B2DecodeLayerRecord,
-    B2PrefillLayerRecord,
-)
-from experiments.head_analysis.collectors.prefill_consistency import B2CollectorConfig, UINT32_SENTINEL
+from experiments.head_analysis.tests.fixtures import make_decode, make_prefill
 from experiments.head_analysis.storage.b2_trace_writer import (
     B2SampleWriteRequest,
     B2TraceSchema,
@@ -15,63 +11,6 @@ from experiments.head_analysis.storage.b2_trace_writer import (
     B2TraceWriterError,
     validate_b2_run,
 )
-
-
-def make_prefill(layer_id, *, kv_heads=2, prompt_length=384):
-    config = B2CollectorConfig()
-    conditions = len(config.conditions)
-    kmax = config.critical_token_max
-    counts = np.asarray(
-        [prompt_length - condition.initial_exclusion - condition.recent_exclusion for condition in config.conditions],
-        dtype=np.uint32,
-    )
-    starts = np.asarray([condition.initial_exclusion for condition in config.conditions], dtype=np.uint32)
-    ends = np.asarray([prompt_length - condition.recent_exclusion for condition in config.conditions], dtype=np.uint32)
-    histogram = np.zeros((kv_heads, conditions, 65), dtype=np.uint32)
-    histogram[:, :, 0] = counts - 1
-    histogram[:, :, 1] = 1
-    positions = np.full((kv_heads, conditions, kmax), UINT32_SENTINEL, dtype=np.uint32)
-    positions[:, :, 0] = starts
-    frequencies = np.zeros((kv_heads, conditions, kmax), dtype=np.uint8)
-    frequencies[:, :, 0] = 1
-    return B2PrefillLayerRecord(
-        sample_id="tiny",
-        layer_id=layer_id,
-        forward_id=0,
-        condition_ids=tuple(condition.condition_id for condition in config.conditions),
-        cv_prefill=np.ones((kv_heads, conditions), dtype=np.float32),
-        frequency_mean=np.ones((kv_heads, conditions), dtype=np.float32),
-        frequency_std=np.ones((kv_heads, conditions), dtype=np.float32),
-        binary_threshold=np.full((kv_heads, conditions), 0.1, dtype=np.float32),
-        candidate_token_count=counts,
-        candidate_position_start=starts,
-        candidate_position_end_exclusive=ends,
-        nonzero_frequency_count=np.ones((kv_heads, conditions), dtype=np.uint32),
-        frequency_histogram=histogram,
-        critical_token_positions=positions,
-        critical_token_frequencies=frequencies,
-        critical_token_valid_count=np.ones((kv_heads, conditions), dtype=np.uint32),
-        metric_valid=np.ones((kv_heads, conditions), dtype=bool),
-    )
-
-
-def make_decode(layer_id, step, *, kv_heads=2):
-    mass = np.empty((kv_heads, 4, 3, 2), dtype=np.float32)
-    mass[:, :, 0, 0] = 0.1
-    mass[:, :, 1, 0] = 0.2
-    mass[:, :, 2, 0] = 0.3
-    mass[:, :, 0, 1] = 0.2
-    mass[:, :, 1, 1] = 0.3
-    mass[:, :, 2, 1] = 0.4
-    return B2DecodeLayerRecord(
-        sample_id="tiny",
-        layer_id=layer_id,
-        forward_id=step + 1,
-        decode_step=step,
-        query_position=384 + step,
-        prompt_attention_mass=np.full(kv_heads, 0.8, dtype=np.float32),
-        critical_attention_mass=mass,
-    )
 
 
 def metadata():

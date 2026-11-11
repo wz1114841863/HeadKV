@@ -13,7 +13,8 @@ from transformers import AutoTokenizer
 
 from experiments.head_analysis.analysis.page_rco import PageRCOError, write_json_new
 from experiments.head_analysis.analysis.task_checks import TaskCheckError, evaluate_ruler_answer
-from experiments.head_analysis.runners.b1_runner import generated_ids_sha256, iter_jsonl, validate_frozen_record
+from experiments.head_analysis.runners.b1_runner import generated_ids_sha256
+from experiments.head_analysis.runners.input_selection import iter_jsonl, validate_frozen_record
 
 
 def sha256_bytes(value: bytes) -> str:

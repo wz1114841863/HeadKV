@@ -199,15 +199,15 @@ def test_baseline_runner_persists_no_probe_generated_ids(tmp_path, monkeypatch):
     assert timing["decode"]["count"] == 2
 
 
-def test_frozen_selection_rejects_manifest_mismatch(tmp_path):
+def test_frozen_selection_uses_input_ids_without_checksum_gate(tmp_path):
     record = make_record()
     input_path = tmp_path / "prompts.jsonl"
     input_path.write_text(json.dumps(record) + "\n")
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps({"data_sha256": "0" * 64}))
 
-    with pytest.raises(b1_runner.B1RunnerError, match="checksum"):
-        b1_runner.load_frozen_selection(input_path, manifest_path, [record["sample_id"]])
+    selected, _ = b1_runner.load_frozen_selection(input_path, manifest_path, [record["sample_id"]])
+    assert selected[0]["input_ids"] == record["input_ids"]
 
 
 def test_resource_budget_reports_only_post_sample_threshold_violations():

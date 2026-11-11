@@ -7,17 +7,13 @@ import traceback
 from pathlib import Path
 from typing import Optional
 
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "120")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "600")
+
 import torch
 import huggingface_hub
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
-
-os.environ["HF_ENDPOINT"] = "https://huggingface.co"
-os.environ["HF_HUB_ETAG_TIMEOUT"] = "120"
-os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "600"
-os.environ.pop("HF_HUB_DISABLE_XET", None)
-os.environ.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
-
 
 # ============================================================
 # 模型列表

@@ -4,7 +4,7 @@ import json
 import pytest
 
 from experiments.head_analysis.scripts import analyze_b1_run_set, finalize_b1_analysis
-from experiments.head_analysis.tests.test_b1_offline import make_fixture
+from experiments.head_analysis.tests.fixtures import make_fixture
 
 
 def test_finalize_builds_completed_numeric_table_and_figure_bundle(tmp_path, monkeypatch):
@@ -13,8 +13,6 @@ def test_finalize_builds_completed_numeric_table_and_figure_bundle(tmp_path, mon
     stage4 = tmp_path / "stage4"
     stage5 = tmp_path / "stage5"
     completed = tmp_path / "completed"
-    monkeypatch.setattr(analyze_b1_run_set, "validate_analysis_git_state", lambda _: None)
-    monkeypatch.setattr(finalize_b1_analysis, "validate_analysis_git_state", lambda _: None)
     common = [
         "--run-set",
         str(run_set),

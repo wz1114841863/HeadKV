@@ -6,7 +6,6 @@ opens model weights or raw Attention traces, and it does not write files.
 
 from __future__ import annotations
 
-import hashlib
 import time
 from dataclasses import dataclass
 from itertools import combinations
@@ -15,7 +14,10 @@ from typing import Callable, Mapping
 
 import numpy as np
 
-from experiments.head_analysis.analysis.b1_offline import B1OfflineError
+from experiments.head_analysis.storage.b1_reader import B1OfflineError
+from experiments.head_analysis.common.statistics import correlation_1d as _correlation
+from experiments.head_analysis.common.statistics import finite_mean
+from experiments.head_analysis.common.statistics import seed_from_label as _seed
 
 PRIMARY_RELATION_DELTAS = (1, 32, 128, 256)
 QUERY_RELATION_FEATURES = (
@@ -241,16 +243,7 @@ def _validate_inputs(inputs: RelationshipInputs) -> None:
 
 
 def _finite_mean(values: np.ndarray, axis: int | tuple[int, ...]) -> np.ndarray:
-    valid = np.isfinite(values)
-    count = valid.sum(axis=axis)
-    output = np.full(count.shape, np.nan, dtype=np.float32)
-    np.divide(
-        np.where(valid, values, 0.0).sum(axis=axis, dtype=np.float64),
-        count,
-        out=output,
-        where=count > 0,
-    )
-    return output
+    return finite_mean(values, axis, dtype=np.float32)
 
 
 def _gqa_mean(values: np.ndarray, kv_heads: int) -> np.ndarray:
@@ -290,44 +283,8 @@ def build_primary_profiles(inputs: RelationshipInputs) -> dict[str, np.ndarray]:
     return profiles
 
 
-def _average_ranks(values: np.ndarray) -> np.ndarray:
-    order = np.argsort(values, kind="mergesort")
-    sorted_values = values[order]
-    ranks = np.empty(len(values), dtype=np.float64)
-    start = 0
-    while start < len(values):
-        end = start + 1
-        while end < len(values) and sorted_values[end] == sorted_values[start]:
-            end += 1
-        ranks[order[start:end]] = (start + end - 1) / 2.0
-        start = end
-    return ranks
-
-
-def _correlation(x: np.ndarray, y: np.ndarray) -> tuple[int, float, float]:
-    valid = np.isfinite(x) & np.isfinite(y)
-    x = x[valid].astype(np.float64, copy=False)
-    y = y[valid].astype(np.float64, copy=False)
-    count = len(x)
-    if count < 3:
-        return count, float("nan"), float("nan")
-
-    def pearson(left: np.ndarray, right: np.ndarray) -> float:
-        left = left - left.mean()
-        right = right - right.mean()
-        denominator = np.sqrt(np.dot(left, left) * np.dot(right, right))
-        return float(np.dot(left, right) / denominator) if denominator > 0 else float("nan")
-
-    return count, pearson(_average_ranks(x), _average_ranks(y)), pearson(x, y)
-
-
 def _layer_center(values: np.ndarray) -> np.ndarray:
     return values - _finite_mean(values, axis=1)[:, None]
-
-
-def _seed(base_seed: int, label: str) -> int:
-    digest = hashlib.sha256(f"{base_seed}:{label}".encode("utf-8")).digest()
-    return int.from_bytes(digest[:8], "little", signed=False)
 
 
 def _bootstrap_mean(values: np.ndarray, draws: np.ndarray) -> np.ndarray:

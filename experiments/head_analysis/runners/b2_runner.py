@@ -22,7 +22,7 @@ import torch
 import transformers
 from transformers import AutoTokenizer
 
-from experiments.head_analysis.analysis.b1_offline import (
+from experiments.head_analysis.storage.b1_reader import (
     B1OfflineError,
     RunBatch,
     RunSetIndex,
@@ -35,27 +35,21 @@ from experiments.head_analysis.collectors.b2_attention import (
     B2PrefillLayerRecord,
 )
 from experiments.head_analysis.collectors.prefill_consistency import B2CollectorConfig
-from experiments.head_analysis.runners.b1_runner import (
-    frozen_length,
-    generated_ids_sha256,
-    git_state,
-    load_frozen_selection,
-    load_model,
-    model_dimensions,
-)
+from experiments.head_analysis.runners.b1_runner import generated_ids_sha256, git_state
+from experiments.head_analysis.runners.input_selection import frozen_length, load_frozen_selection
 from experiments.head_analysis.runners.resource_metrics import (
     GenerationPhaseTimer,
     measurement_contract,
     validate_standard_greedy_timing,
 )
 from experiments.head_analysis.runtime.attention_probe import AttentionProbe
+from experiments.head_analysis.runtime.model import load_model, model_dimensions
 from experiments.head_analysis.storage.b2_trace_writer import (
     B2SampleWriteRequest,
     B2TraceSchema,
     B2TraceWriter,
     collector_config_sha256,
 )
-
 
 FROZEN_B1_RUN_SET_SHA256 = "039afecab0135169ccac0e96050a414b3e313d37d6108d7d648cae80bbcbd85d"
 FROZEN_DATA_SHA256 = "30ea0f8a85e203c8cf63a87e83805e851345c42a2a2fd9ab7f4dbdc1c63492ee"

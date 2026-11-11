@@ -7,9 +7,10 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from transformers import AutoTokenizer
+from experiments.head_analysis.common.io import iter_jsonl
 
 GOV_PREFIX = (
     "Read the following government report carefully. Produce a detailed, "
@@ -46,17 +47,6 @@ def write_jsonl(rows: list[dict], path: Path) -> None:
     with path.open("w", encoding="utf-8") as f:
         for x in rows:
             f.write(json.dumps(x, ensure_ascii=False, separators=(",", ":")) + "\n")
-
-
-def iter_jsonl(path: Path) -> Iterable[dict]:
-    with path.open(encoding="utf-8") as f:
-        for line_no, line in enumerate(f, 1):
-            if not line.strip():
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError as e:
-                fail(f"JSONL parse error {path}:{line_no}: {e}")
 
 
 def parquet_files(path: Path) -> list[Path]:

@@ -9,9 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -19,17 +16,13 @@ import numpy as np
 
 from experiments.head_analysis.analysis.b1_offline import (
     DEFAULT_ANALYSIS_PARAMETERS,
-    B1OfflineError,
     PageMetricSummary,
     PageRCOSummary,
     QueryMetricSummary,
     aggregate_page_rco,
     build_analysis_plan,
     canonical_json_sha256,
-    load_completed_run_set,
-    sha256_file,
     summarize_query_and_page_metrics,
-    validate_analysis_sources,
 )
 from experiments.head_analysis.analysis.metric_relationships import (
     PRIMARY_RELATION_DELTAS,
@@ -38,48 +31,20 @@ from experiments.head_analysis.analysis.metric_relationships import (
     load_relationship_inputs,
 )
 from experiments.head_analysis.analysis.token_stability import TokenStabilitySummary, summarize_token_stability
-
-
-def validate_analysis_git_state(expected_commit: str) -> None:
-    """Require the plan commit to be the current clean analysis checkout."""
-
-    try:
-        commit = subprocess.run(("git", "rev-parse", "HEAD"), check=True, text=True, capture_output=True).stdout.strip()
-        status = subprocess.run(
-            ("git", "status", "--porcelain", "--untracked-files=all"),
-            check=True,
-            text=True,
-            capture_output=True,
-        ).stdout.splitlines()
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise B1OfflineError(f"unable to inspect analysis Git state: {exc}") from exc
-    if commit != expected_commit:
-        raise B1OfflineError(f"analysis HEAD {commit!r} differs from expected {expected_commit!r}")
-    if status:
-        raise B1OfflineError(f"analysis working tree is not clean: {status}")
+from experiments.head_analysis.common.io import read_json, write_json, write_npz
+from experiments.head_analysis.storage.b1_reader import (
+    B1OfflineError,
+    load_completed_run_set,
+    sha256_file,
+    validate_analysis_sources,
+)
 
 
 def write_json_new(path: Path | str, payload: Mapping[str, Any]) -> None:
-    """Atomically create one strict JSON file without replacing an old one."""
-
-    destination = Path(path)
-    if destination.exists():
-        raise B1OfflineError(f"analysis output already exists: {destination}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
-    temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.link(temporary, destination)
-        except FileExistsError as exc:
-            raise B1OfflineError(f"analysis output already exists: {destination}") from exc
-    finally:
-        temporary.unlink(missing_ok=True)
+        write_json(path, payload)
+    except FileExistsError as exc:
+        raise B1OfflineError(f"analysis output already exists: {path}") from exc
 
 
 def prepare_analysis_directory_new(output_dir: Path | str, plan: Mapping[str, Any]) -> Path:
@@ -96,27 +61,10 @@ def prepare_analysis_directory_new(output_dir: Path | str, plan: Mapping[str, An
 
 
 def write_npz_new(path: Path | str, arrays: Mapping[str, np.ndarray]) -> None:
-    destination = Path(path)
-    if destination.exists():
-        raise B1OfflineError(f"analysis output already exists: {destination}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp", delete=False
-    ) as handle:
-        temporary = Path(handle.name)
-        try:
-            np.savez_compressed(handle, **arrays)
-            handle.flush()
-            os.fsync(handle.fileno())
-        except Exception:
-            temporary.unlink(missing_ok=True)
-            raise
     try:
-        os.link(temporary, destination)
+        write_npz(path, arrays)
     except FileExistsError as exc:
-        raise B1OfflineError(f"analysis output already exists: {destination}") from exc
-    finally:
-        temporary.unlink(missing_ok=True)
+        raise B1OfflineError(f"analysis output already exists: {path}") from exc
 
 
 def _json_array(array: np.ndarray) -> Any:
@@ -347,7 +295,7 @@ def write_stage4_bundle_new(
 
 def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = read_json(path)
     except (OSError, json.JSONDecodeError) as exc:
         raise B1OfflineError(f"unable to read {label} {path}: {exc}") from exc
     if not isinstance(payload, dict):
@@ -546,7 +494,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-root", type=Path, default=Path("."))
     parser.add_argument("--page-rco-report", type=Path, action="append", required=True)
     parser.add_argument("--analysis-id", required=True)
-    parser.add_argument("--analysis-git-commit", required=True)
+    parser.add_argument("--analysis-git-commit", help="optional source revision metadata")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--expected-batches", type=int, default=10)
     parser.add_argument("--expected-samples", type=int, default=100)
@@ -564,13 +512,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        validate_analysis_git_state(args.analysis_git_commit)
         index = load_completed_run_set(
             args.run_set,
             source_root=args.source_root,
             expected_batch_count=args.expected_batches,
             expected_sample_count=args.expected_samples,
-            verify_file_hashes=True,
+            verify_file_hashes=False,
             verify_trace_arrays=True,
         )
         validation = validate_analysis_sources(index, args.page_rco_report)

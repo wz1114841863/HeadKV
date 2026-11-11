@@ -5,27 +5,23 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
 import shutil
-import tempfile
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from experiments.head_analysis.analysis.b1_offline import B1OfflineError, canonical_json_sha256, sha256_file
-from experiments.head_analysis.scripts.analyze_b1_run_set import (
-    validate_analysis_git_state,
-    write_json_new,
-    write_npz_new,
-)
+from experiments.head_analysis.storage.b1_reader import B1OfflineError
+from experiments.head_analysis.common.io import atomic_file, canonical_json_sha256, read_json, sha256_file
+from experiments.head_analysis.common.io import write_json as write_json_new
+from experiments.head_analysis.common.io import write_npz as write_npz_new
 
 FINAL_SCHEMA_VERSION = "headkv-v1-b1-offline-completed-v1"
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = read_json(path)
     except (OSError, json.JSONDecodeError) as exc:
         raise B1OfflineError(f"unable to read {label} {path}: {exc}") from exc
     if not isinstance(payload, dict):
@@ -112,22 +108,11 @@ def validate_final_sources(
 
 
 def _write_text_new(path: Path, writer: Callable[[Any], None]) -> None:
-    if path.exists():
-        raise B1OfflineError(f"analysis output already exists: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+        with atomic_file(path) as handle:
             writer(handle)
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.link(temporary, path)
-        except FileExistsError as exc:
-            raise B1OfflineError(f"analysis output already exists: {path}") from exc
-    finally:
-        temporary.unlink(missing_ok=True)
+    except FileExistsError as exc:
+        raise B1OfflineError(f"final output already exists: {path}") from exc
 
 
 def _write_csv(path: Path, fieldnames: Sequence[str], rows: Sequence[Mapping[str, Any]]) -> None:
@@ -585,7 +570,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage4-dir", type=Path, required=True)
     parser.add_argument("--stage5-dir", type=Path, required=True)
     parser.add_argument("--analysis-id", required=True)
-    parser.add_argument("--analysis-git-commit", required=True)
+    parser.add_argument("--analysis-git-commit", help="optional source revision metadata")
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser
 
@@ -593,7 +578,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        validate_analysis_git_state(args.analysis_git_commit)
         manifest = finalize_bundle_new(
             stage3_dir=args.stage3_dir,
             stage4_dir=args.stage4_dir,

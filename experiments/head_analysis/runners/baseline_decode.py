@@ -9,10 +9,7 @@ ID comparison; it is not an attention trace.
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sys
-import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,51 +18,31 @@ from typing import Any, Sequence
 import torch
 from transformers import AutoTokenizer
 
+from experiments.head_analysis.common.io import write_json
 from experiments.head_analysis.runners.b1_runner import (
     B1RunnerError,
-    eos_token_ids,
-    frozen_length,
     generated_ids_sha256,
     generation_stop_reason,
     git_state,
-    load_frozen_selection,
-    load_model,
     requested_generation_budget,
     sha256_bytes,
 )
+from experiments.head_analysis.runners.input_selection import frozen_length, load_frozen_selection
 from experiments.head_analysis.runners.resource_metrics import (
     GenerationPhaseTimer,
     measurement_contract,
     validate_standard_greedy_timing,
 )
-
+from experiments.head_analysis.runtime.model import eos_token_ids, load_model
 
 BASELINE_SCHEMA_VERSION = "headkv-baseline-decode-v1"
 
 
-def write_json_new(path: Path, payload: dict[str, Any]) -> None:
-    """Atomically create a baseline artifact and refuse to overwrite one."""
-
-    if path.exists():
-        raise B1RunnerError(f"baseline output already exists: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    temporary_path = Path(temporary_name)
+def write_json_new(path: Path | str, payload: dict[str, Any]) -> None:
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            # link(2) is atomic and, unlike replace(2), cannot overwrite an
-            # existing completed baseline artifact.
-            os.link(temporary_path, path)
-        except FileExistsError as exc:
-            raise B1RunnerError(f"baseline output already exists: {path}") from exc
-    except Exception:
-        temporary_path.unlink(missing_ok=True)
-        raise
+        write_json(path, payload, allow_nan=True)
+    except FileExistsError as exc:
+        raise B1RunnerError(f"baseline output already exists: {path}") from exc
 
 
 def run_baseline(args: argparse.Namespace) -> int:

@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import tempfile
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 import numpy as np
 
+from experiments.head_analysis.common.io import write_json
 
 PAGE_SCOPES = ("all_visible", "prompt_only")
 SENTINEL = np.iinfo(np.uint32).max
@@ -188,23 +187,7 @@ def analyze_completed_run(
 
 
 def write_json_new(path: Path | str, payload: dict[str, Any]) -> None:
-    """Atomically create a new analysis artifact without overwriting an old one."""
-
-    destination = Path(path)
-    if destination.exists():
-        raise PageRCOError(f"analysis output already exists: {destination}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
-    temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.link(temporary, destination)
-        except FileExistsError as exc:
-            raise PageRCOError(f"analysis output already exists: {destination}") from exc
-    finally:
-        temporary.unlink(missing_ok=True)
+        write_json(path, payload, allow_nan=True)
+    except FileExistsError as exc:
+        raise PageRCOError(f"analysis output already exists: {path}") from exc

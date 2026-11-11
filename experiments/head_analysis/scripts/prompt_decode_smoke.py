@@ -23,7 +23,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
+
+from experiments.head_analysis.runtime.model import eos_token_ids, load_model
+from experiments.head_analysis.common.io import iter_jsonl as _iter_jsonl
 
 SMOKE_BUCKETS = (
     ("ruler", 8192),
@@ -48,17 +51,7 @@ def ids_digest(ids: list[int]) -> str:
 
 
 def iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
-    with path.open(encoding="utf-8") as handle:
-        for line_no, line in enumerate(handle, 1):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
-                fail(f"JSONL parse error {path}:{line_no}: {exc}")
-            if not isinstance(record, dict):
-                fail(f"JSONL record {path}:{line_no} is not an object")
-            yield record
+    yield from _iter_jsonl(path, require_objects=True)
 
 
 def write_json(path: Path, payload: dict[str, Any], overwrite: bool) -> None:
@@ -160,44 +153,6 @@ def validate_saved_record(tokenizer, record: dict[str, Any]) -> dict[str, Any]:
         "input_integrity_passed": not errors,
         "input_integrity_errors": errors,
     }
-
-
-def resolve_dtype(name: str):
-    if name == "auto":
-        return None
-    return {
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
-        "float32": torch.float32,
-    }[name]
-
-
-def load_model(model_path: str, device_name: str, dtype_name: str, attn_implementation: str):
-    device = torch.device(device_name)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        fail(f"CUDA device requested ({device_name}) but torch.cuda.is_available() is false")
-    kwargs: dict[str, Any] = {
-        "local_files_only": True,
-        "attn_implementation": attn_implementation,
-    }
-    dtype = resolve_dtype(dtype_name)
-    if dtype is not None:
-        kwargs["dtype"] = dtype
-    model = AutoModelForCausalLM.from_pretrained(model_path, **kwargs)
-    model.to(device)
-    model.eval()
-    return model, device
-
-
-def eos_ids(model, tokenizer) -> set[int]:
-    values = getattr(model.generation_config, "eos_token_id", None)
-    if values is None:
-        values = getattr(tokenizer, "eos_token_id", None)
-    if isinstance(values, int):
-        return {values}
-    if isinstance(values, (list, tuple)):
-        return {value for value in values if isinstance(value, int)}
-    return set()
 
 
 def max_repeated_run(ids: list[int]) -> int:
@@ -306,7 +261,7 @@ def generate_record(
         generated_ids,
         generated_text,
         requested_new_tokens,
-        eos_ids(model, tokenizer),
+        eos_token_ids(model, tokenizer),
         pg19_min_new_tokens,
         repeat_ngram_threshold,
         unique_token_threshold,

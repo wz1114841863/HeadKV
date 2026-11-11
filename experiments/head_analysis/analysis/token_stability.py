@@ -8,7 +8,8 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from experiments.head_analysis.analysis.b1_offline import B1OfflineError, RunBatch, RunSetIndex
+from experiments.head_analysis.common.statistics import bootstrap_sample_mean_ci as _bootstrap
+from experiments.head_analysis.storage.b1_reader import B1OfflineError, RunBatch, RunSetIndex
 from experiments.head_analysis.collectors.attention_stats import UINT32_SENTINEL
 
 TOKEN_METRICS = (
@@ -273,22 +274,6 @@ def _head_mean(values: np.ndarray) -> np.ndarray:
         where=counts > 0,
     )
     return output
-
-
-def _bootstrap(values: np.ndarray, replicates: int, rng: np.random.Generator) -> np.ndarray:
-    draws = rng.integers(0, len(values), size=(replicates, len(values)))
-    flat = values.reshape(len(values), -1).astype(np.float64, copy=False)
-    output = np.full((flat.shape[1], 2), np.nan, dtype=np.float32)
-    for column in np.flatnonzero(np.isfinite(flat).any(axis=0)):
-        selected = flat[draws, column]
-        valid = np.isfinite(selected)
-        counts = valid.sum(axis=1)
-        means = np.full(replicates, np.nan, dtype=np.float64)
-        np.divide(np.where(valid, selected, 0.0).sum(axis=1), counts, out=means, where=counts > 0)
-        means = means[np.isfinite(means)]
-        if means.size:
-            output[column] = np.quantile(means, (0.025, 0.975))
-    return output.reshape((*values.shape[1:], 2))
 
 
 def summarize_token_stability(

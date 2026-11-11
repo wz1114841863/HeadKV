@@ -9,21 +9,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from experiments.head_analysis.collectors.attention_stats import (
-    FEATURE_NAMES,
-    UINT32_SENTINEL,
-    CollectedAttention,
-)
+from experiments.head_analysis.collectors.attention_stats import FEATURE_NAMES, UINT32_SENTINEL, CollectedAttention
+from experiments.head_analysis.common.io import file_entry, write_json, write_npz
 from kvpress.context import KVPhase
-
 
 SCHEMA_VERSION = "headkv-v1-b1-attention-v1"
 PAGE_SCOPES = ("all_visible", "prompt_only")
@@ -520,10 +514,8 @@ class AttentionTraceWriter:
         self._manifest_entries[entry["relative_path"]] = entry
 
     def _write_json(self, path: Path, data: Mapping[str, Any], *, sample_id: str | None = None) -> dict[str, Any]:
-        self._atomic_write_bytes(
-            path, json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8") + b"\n"
-        )
-        return self._file_entry(path, sample_id=sample_id)
+        write_json(path, data, overwrite=True, allow_nan=True)
+        return file_entry(path, self.run_dir, sample_id=sample_id)
 
     def _write_npz(
         self,
@@ -534,69 +526,14 @@ class AttentionTraceWriter:
         step_start: int | None = None,
         step_end: int | None = None,
     ) -> dict[str, Any]:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
-        ) as handle:
-            temporary_path = Path(handle.name)
-            try:
-                np.savez_compressed(handle, **arrays)
-                handle.flush()
-                os.fsync(handle.fileno())
-                os.replace(temporary_path, path)
-            except Exception:
-                temporary_path.unlink(missing_ok=True)
-                raise
-        return self._file_entry(path, sample_id=sample_id, arrays=arrays, step_start=step_start, step_end=step_end)
+        write_npz(path, arrays, overwrite=True)
+        return file_entry(
+            path, self.run_dir, arrays=arrays, sample_id=sample_id, step_start=step_start, step_end=step_end
+        )
 
     def _write_manifest(self) -> None:
         payload = {"files": [self._manifest_entries[key] for key in sorted(self._manifest_entries)]}
-        self._atomic_write_bytes(
-            self.run_dir / "file_manifest.json", json.dumps(payload, indent=2, sort_keys=True).encode("utf-8") + b"\n"
-        )
-
-    def _file_entry(
-        self,
-        path: Path,
-        *,
-        sample_id: str | None = None,
-        arrays: Mapping[str, np.ndarray] | None = None,
-        step_start: int | None = None,
-        step_end: int | None = None,
-    ) -> dict[str, Any]:
-        content = path.read_bytes()
-        entry: dict[str, Any] = {
-            "relative_path": path.relative_to(self.run_dir).as_posix(),
-            "sha256": hashlib.sha256(content).hexdigest(),
-            "file_bytes": len(content),
-            "logical_array_bytes": 0 if arrays is None else int(sum(array.nbytes for array in arrays.values())),
-        }
-        if arrays is not None:
-            entry["arrays"] = [
-                {"name": name, "shape": list(array.shape), "dtype": str(array.dtype)} for name, array in arrays.items()
-            ]
-        if sample_id is not None:
-            entry["sample_id"] = sample_id
-        if step_start is not None and step_end is not None:
-            entry["step_start"] = step_start
-            entry["step_end"] = step_end
-        return entry
-
-    @staticmethod
-    def _atomic_write_bytes(path: Path, content: bytes) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
-        ) as handle:
-            temporary_path = Path(handle.name)
-            try:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-                os.replace(temporary_path, path)
-            except Exception:
-                temporary_path.unlink(missing_ok=True)
-                raise
+        write_json(self.run_dir / "file_manifest.json", payload, overwrite=True)
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:

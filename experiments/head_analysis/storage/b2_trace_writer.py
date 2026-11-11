@@ -4,21 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from experiments.head_analysis.collectors.b2_attention import (
-    SET_TYPES,
-    B2DecodeLayerRecord,
-    B2PrefillLayerRecord,
-)
-from experiments.head_analysis.collectors.prefill_consistency import B2CollectorConfig, UINT32_SENTINEL
-
+from experiments.head_analysis.collectors.b2_attention import SET_TYPES, B2DecodeLayerRecord, B2PrefillLayerRecord
+from experiments.head_analysis.collectors.prefill_consistency import UINT32_SENTINEL, B2CollectorConfig
+from experiments.head_analysis.common.io import file_entry, read_json, write_json, write_npz
 
 B2_SCHEMA_VERSION = "headkv-v1-b2-prefill-consistency-v1"
 
@@ -498,10 +492,8 @@ class B2TraceWriter:
         self._manifest_entries[entry["relative_path"]] = entry
 
     def _write_json(self, path: Path, data: Mapping[str, Any], sample_id: str | None = None) -> dict[str, Any]:
-        self._atomic_write_bytes(
-            path, json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8") + b"\n"
-        )
-        return self._file_entry(path, sample_id=sample_id)
+        write_json(path, data, overwrite=True, allow_nan=True)
+        return file_entry(path, self.run_dir, sample_id=sample_id)
 
     def _write_npz(
         self,
@@ -512,74 +504,18 @@ class B2TraceWriter:
         step_start: int | None = None,
         step_end: int | None = None,
     ) -> dict[str, Any]:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
-        ) as handle:
-            temporary_path = Path(handle.name)
-            try:
-                np.savez_compressed(handle, **arrays)
-                handle.flush()
-                os.fsync(handle.fileno())
-                os.replace(temporary_path, path)
-            except Exception:
-                temporary_path.unlink(missing_ok=True)
-                raise
-        return self._file_entry(path, sample_id=sample_id, arrays=arrays, step_start=step_start, step_end=step_end)
+        write_npz(path, arrays, overwrite=True)
+        return file_entry(
+            path, self.run_dir, arrays=arrays, sample_id=sample_id, step_start=step_start, step_end=step_end
+        )
 
     def _write_manifest(self) -> None:
         payload = {"files": [self._manifest_entries[key] for key in sorted(self._manifest_entries)]}
-        self._atomic_write_bytes(
-            self.run_dir / "file_manifest.json",
-            json.dumps(payload, indent=2, sort_keys=True).encode("utf-8") + b"\n",
-        )
-
-    def _file_entry(
-        self,
-        path: Path,
-        *,
-        sample_id: str | None = None,
-        arrays: Mapping[str, np.ndarray] | None = None,
-        step_start: int | None = None,
-        step_end: int | None = None,
-    ) -> dict[str, Any]:
-        content = path.read_bytes()
-        entry: dict[str, Any] = {
-            "relative_path": path.relative_to(self.run_dir).as_posix(),
-            "sha256": hashlib.sha256(content).hexdigest(),
-            "file_bytes": len(content),
-            "logical_array_bytes": 0 if arrays is None else int(sum(array.nbytes for array in arrays.values())),
-        }
-        if arrays is not None:
-            entry["arrays"] = [
-                {"name": name, "shape": list(array.shape), "dtype": str(array.dtype)} for name, array in arrays.items()
-            ]
-        if sample_id is not None:
-            entry["sample_id"] = sample_id
-        if step_start is not None and step_end is not None:
-            entry["step_start"] = step_start
-            entry["step_end"] = step_end
-        return entry
-
-    @staticmethod
-    def _atomic_write_bytes(path: Path, content: bytes) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
-        ) as handle:
-            temporary_path = Path(handle.name)
-            try:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-                os.replace(temporary_path, path)
-            except Exception:
-                temporary_path.unlink(missing_ok=True)
-                raise
+        write_json(self.run_dir / "file_manifest.json", payload, overwrite=True)
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = read_json(path)
         if not isinstance(value, dict):
             raise B2TraceWriterError(f"expected JSON object in {path}")
         return value
@@ -591,7 +527,7 @@ class B2TraceWriter:
 
 def _load_json_object(path: Path) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = read_json(path)
     except (OSError, json.JSONDecodeError) as exc:
         raise B2TraceWriterError(f"unable to read JSON {path}: {exc}") from exc
     if not isinstance(payload, dict):
@@ -623,7 +559,9 @@ def _validate_npz_entry(run_dir: Path, entry: Mapping[str, Any]) -> dict[str, np
     return arrays
 
 
-def validate_b2_run(run_dir: Path | str, *, require_completed: bool = True) -> B2RunValidationResult:
+def validate_b2_run(
+    run_dir: Path | str, *, require_completed: bool = True, verify_hashes: bool = True
+) -> B2RunValidationResult:
     """Independently validate hashes, schema, alignment, and B2 invariants."""
 
     run_dir = Path(run_dir)
@@ -644,13 +582,14 @@ def validate_b2_run(run_dir: Path | str, *, require_completed: bool = True) -> B
 
     config_payload = snapshot.get("collector_config")
     config_hash = snapshot.get("collector_config_sha256")
-    if not isinstance(config_payload, dict) or not isinstance(config_hash, str):
+    if not isinstance(config_payload, dict) or (verify_hashes and not isinstance(config_hash, str)):
         raise B2TraceWriterError("config snapshot lacks collector configuration/hash")
-    actual_config_hash = hashlib.sha256(
-        json.dumps(config_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    if actual_config_hash != config_hash or schema.get("collector_config_sha256") != config_hash:
-        raise B2TraceWriterError("collector configuration hash is inconsistent")
+    if verify_hashes:
+        actual_config_hash = hashlib.sha256(
+            json.dumps(config_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if actual_config_hash != config_hash or schema.get("collector_config_sha256") != config_hash:
+            raise B2TraceWriterError("collector configuration hash is inconsistent")
 
     entries_value = manifest.get("files")
     if not isinstance(entries_value, list):
@@ -665,20 +604,21 @@ def validate_b2_run(run_dir: Path | str, *, require_completed: bool = True) -> B
             raise B2TraceWriterError(f"invalid or duplicate manifest path {relative_path!r}")
         path = run_dir / relative_path
         try:
-            content = path.read_bytes()
+            size = path.stat().st_size
         except OSError as exc:
             raise B2TraceWriterError(f"missing manifest artifact {relative_path}: {exc}") from exc
-        if len(content) != entry.get("file_bytes") or hashlib.sha256(content).hexdigest() != entry.get("sha256"):
+        if verify_hashes and (size != entry.get("file_bytes") or hashlib.sha256(path.read_bytes()).hexdigest() != entry.get("sha256")):
             raise B2TraceWriterError(f"artifact hash/size differs from manifest: {relative_path}")
         entries[relative_path] = entry
-        total_bytes += len(content)
-    actual_files = {
-        path.relative_to(run_dir).as_posix()
-        for path in run_dir.rglob("*")
-        if path.is_file() and path.name != "file_manifest.json"
-    }
-    if actual_files != set(entries):
-        raise B2TraceWriterError("run files differ from the file manifest")
+        total_bytes += size
+    if verify_hashes:
+        actual_files = {
+            path.relative_to(run_dir).as_posix()
+            for path in run_dir.rglob("*")
+            if path.is_file() and path.name != "file_manifest.json"
+        }
+        if actual_files != set(entries):
+            raise B2TraceWriterError("run files differ from the file manifest")
 
     dimensions = schema.get("dimensions")
     axes = schema.get("axes")
@@ -717,10 +657,13 @@ def validate_b2_run(run_dir: Path | str, *, require_completed: bool = True) -> B
         ids = replay_payload.get("ids")
         if not isinstance(ids, list) or not ids:
             raise B2TraceWriterError(f"{sample_id}: replay IDs must be non-empty")
-        replay_array = np.asarray(ids, dtype=np.uint32)
-        replay_hash = hashlib.sha256(replay_array.astype("<u4", copy=False).tobytes()).hexdigest()
-        if replay_payload.get("dtype") != "uint32-little-endian" or replay_payload.get("sha256") != replay_hash:
+        if replay_payload.get("dtype") != "uint32-little-endian":
             raise B2TraceWriterError(f"{sample_id}: replay payload hash/schema is invalid")
+        replay_array = np.asarray(ids, dtype=np.uint32)
+        if verify_hashes:
+            replay_hash = hashlib.sha256(replay_array.astype("<u4", copy=False).tobytes()).hexdigest()
+            if replay_payload.get("sha256") != replay_hash:
+                raise B2TraceWriterError(f"{sample_id}: replay payload hash/schema is invalid")
         sample_status = sample_metadata.get("status")
         if sample_status == "failed":
             failed += 1

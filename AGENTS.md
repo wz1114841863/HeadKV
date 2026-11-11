@@ -1,183 +1,51 @@
-# KV-Base Project Instructions
+# 工作规范
 
-## 1. Purpose and Scope
+## 1. 工作定位
 
-KV-Base is a research-oriented KV Cache framework derived from NVIDIA
-KVPress. Its purpose is rapid prototyping of KV Cache research ideas while
-reusing common model loading, generation, cache access, Prefill/Decode
-lifecycle, tracing, recording, and evaluation infrastructure.
+以科研问题验证和实际功能实现为优先目标。优先帮助用户快速实现研究想法、完成实验和验证结果，而不是追求复杂的软件工程架构。
 
-Typical downstream topics include:
+用户负责研究思路、算法设计和技术决策，Codex 负责代码实现、测试、调试和辅助分析。
 
-- KV distribution and redundancy;
-- attention, head, and token analysis;
-- Prefill compression and Decode eviction;
-- quantization, sparsity, merging, and reconstruction;
-- temporal behavior and access-pattern traces;
-- later system or accelerator studies.
+## 2. 开发原则
 
-This is an algorithm and phenomenon research base, not a production serving
-framework, universal policy language, or hardware simulator. Downstream work
-may modify attention, cache internals, kernels, or model-specific code when
-necessary. Prefer reusing roughly 80% of the common infrastructure while
-allowing the remaining 20% to be specialized.
+1. 优先采用简单、直接、易理解、易修改的实现方式。
+2. 优先复用现有代码，不随意增加抽象层、模块、文件和第三方依赖。
+3. 避免过度防御性编程，只针对真实风险增加必要的检查和异常处理。
+4. 不随意引入复杂的配置系统、日志系统、审计机制和自动化管理框架。
+5. 不生成不必要的辅助文档、哈希清单、检查报告和重复记录。
+6. 严禁无关重构，不为了实现一个局部功能而擅自调整整个项目。
+7. 优先采用最小可行修改。额外复杂度必须有明确的实际理由。
 
-## 2. Working Principles
+## 3. 代码修改要求
 
-- Keep abstractions small and research-useful.
-- Make observation independent from intervention.
-- Preserve existing KVPress Press behavior where practical.
-- Treat Prefill and Decode as explicit execution phases.
-- Do not materialize Q or full attention weights unless an experiment needs
-  them.
-- Keep logical KV reduction separate from physical bytes, traffic, latency,
-  and throughput claims.
-- Do not force every downstream idea into one rigid API.
+1. 修改前先理解现有代码和相关执行逻辑。
+2. 简单任务直接实施；涉及核心算法或多个模块的修改，先说明方案、涉及文件及潜在影响。
+3. 优先修改现有函数，尽量控制修改范围。
+4. 未经明确要求，不擅自改变已有算法、数据处理逻辑和实验协议。
+5. 不随意删除、覆盖已有数据、模型权重和实验结果。
+6. 遇到不确定的问题，先分析和说明，不擅自扩大任务范围。
 
-The current architecture and extension points are documented in:
+## 4. 测试与验证
 
-```text
-docs/base/architecture.md
-docs/base/extension_guide.md
-docs/base/experiment_conventions.md
-```
+1. 根据修改内容选择必要的测试，不盲目增加测试体系。
+2. 重要修改优先进行小规模验证，再运行完整实验。
+3. 保留必要的数值检查、输入约束和实验正确性检查。
+4. 如实报告测试和实验结果，不得将未经实际执行的测试描述为已通过。
+5. 如果验证失败，说明实际错误和未解决的问题，不通过静默回退掩盖错误。
 
-## 3. Before Modifying Code
+## 5. 沟通与结果汇报
 
-For a fresh clone or an upstream version change:
+完成任务后，简要说明：
 
-1. Read `AGENTS.md`, `BASE_STATUS.md`, and `docs/PROJECT_GOALS.md`.
-2. Read `docs/base/architecture.md`, `extension_guide.md`, and
-   `experiment_conventions.md`.
-3. Inspect the actual checked-out source, especially `pipeline.py`,
-   `utils.py`, `context.py`, `observer.py`, `recorder.py`, and the relevant
-   Press classes.
-4. Verify the current baseline before making architectural changes.
-5. Refresh documentation when the source and documentation disagree.
+- 修改了哪些文件。
+- 核心逻辑发生了什么变化。
+- 实际执行了哪些测试及其结果。
+- 是否存在尚未解决的问题。
 
-Do not assume that an older KVPress audit or a previous branch still matches
-the current checkout. Preserve any additional upstream `AGENTS.md` files
-unless they conflict with this fork's explicit goals.
+优先解释关键代码和执行逻辑，帮助用户理解、掌握和独立维护项目。
 
-Before changing generation or cache behavior, determine from the current code:
+## 6. 核心原则
 
-- how models and generation are invoked;
-- how attention modules and Hugging Face Cache objects are reached;
-- where Q/K/V and attention weights are available;
-- how Prefill and Decode are distinguished;
-- when Press hooks execute and how cache writes are applied;
-- how Decode cache growth and QuantizedCache paths work;
-- which model families and model-specific paths are supported;
-- what existing tests and metadata cover the affected path.
+科研问题优先于工程形式，算法正确性优先于架构完整性，代码可理解性优先于过度抽象。
 
-Record implementation facts in the base documentation. Do not fill gaps with
-assumptions.
-
-## 4. Change Discipline
-
-Prefer small, reviewable changes. Do not mix a broad architecture refactor
-with a new paper algorithm.
-
-For each meaningful change, document:
-
-```text
-What changed?
-Why?
-What was the previous behavior?
-What is the new behavior?
-Which code path is affected?
-Does it affect Prefill, Decode, or both?
-How was it verified?
-```
-
-Add a focused regression test for shared infrastructure. Keep method-specific
-scoring rules, one-off visualizations, model workarounds, and specialized
-kernels in downstream research code unless multiple projects need them.
-
-When removing code, first scan imports, public exports, pipeline references,
-tests, documentation, and dependencies. Do not leave broken public imports or
-stale dependency declarations.
-
-## 5. Documentation Rules
-
-Documentation is part of the framework. Keep these files current:
-
-```text
-README.md
-AGENTS.md
-BASE_STATUS.md
-docs/PROJECT_GOALS.md
-docs/base/architecture.md
-docs/base/extension_guide.md
-docs/base/experiment_conventions.md
-```
-
-`AGENTS.md` contains operating rules. Detailed runtime behavior belongs in
-`docs/base/architecture.md`; research workflow belongs in
-`docs/base/extension_guide.md`; indexing and result metadata belong in
-`docs/base/experiment_conventions.md`.
-
-Do not maintain documentation as a file-by-file changelog. Explain design
-intent and current behavior.
-
-## 6. v0.1 Acceptance Checks
-
-Before treating the base as usable, verify these cases:
-
-### Observation only
-
-- inference runs;
-- an Observer records at least one layer/head/token statistic;
-- Prefill/Decode context metadata is correct;
-- output remains baseline-equivalent within expected numerical behavior;
-- the Observer does not mutate the cache.
-
-### Prefill intervention
-
-- a simple deterministic or random retention policy modifies Prefill K/V;
-- cache length/state is sensible;
-- generation continues after the modification.
-
-### Decode intervention
-
-- a controlled operation runs at a known Decode interval;
-- `decode_step` tracking is correct and monotonic;
-- cache updates remain valid;
-- generation continues after the modification.
-
-The focused test suite is:
-
-```bash
-.venv/bin/python -m pytest \
-  tests/test_context.py \
-  tests/test_observer.py \
-  tests/test_recorder.py \
-  tests/test_infrastructure.py \
-  tests/test_attention_patch.py -q
-```
-
-Also run, when the environment permits:
-
-```bash
-.venv/bin/python -m compileall -q kvpress tests
-UV_CACHE_DIR=/tmp/kvbase-uv-cache uv pip check --python .venv/bin/python
-```
-
-For a real model, smoke-test ordinary generation, Prefill Press generation,
-and Decode Press generation. Record model, revision, commit, device, dtype,
-and cache configuration. Model downloads and GPU availability are environment
-conditions, not reasons to claim unverified results.
-
-## 7. v0.1 Boundaries
-
-Do not make the base depend on:
-
-- custom CUDA kernels;
-- vLLM or serving internals;
-- a database or heavy experiment manager;
-- a physical KV memory manager;
-- a universal policy DSL or large plugin registry;
-- a full accelerator simulator.
-
-Downstream projects may later integrate vLLM, FlashInfer, LMCache, custom
-CUDA, simulators, or accelerator models for physical-system validation.
+**必要的地方严格，不必要的地方简单。始终以最小复杂度完成当前任务。**
