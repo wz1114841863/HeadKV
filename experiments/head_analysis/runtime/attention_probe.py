@@ -2,9 +2,10 @@
 
 This module belongs to ``experiments.head_analysis.runtime``: it is a HeadKV
 B1 research probe, not a new generic KV-Base Observer API.  It captures the
-Q/K tensors passed to the selected Transformers attention backend together
-with lifecycle metadata supplied by an Attention-module pre-hook.  It does not
-compute statistics, retain tensors after the callback, or write files.
+Q/K/V tensors passed to the selected Transformers attention backend together
+with lifecycle metadata supplied by an Attention-module pre-hook. An optional
+projection callback observes pre-RoPE K without repeating the projection.
+The probe does not compute statistics, retain tensors after the callback, or write files.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import Callable, Generator, Optional
 
 import torch
@@ -52,11 +54,11 @@ class AttentionProbeEvent:
 
 @dataclass
 class AttentionProbeContext:
-    """Ephemeral Q/K capture passed to one synchronous callback invocation.
+    """Ephemeral post-RoPE, post-cache Q/K/V for a synchronous callback.
 
-    ``query`` and ``key`` are references to the tensors supplied to the real
+    ``query``, ``key`` and ``value`` reference the tensors supplied to the real
     attention function.  A callback may calculate and move compact results to
-    CPU, but must not retain or mutate either tensor.
+    CPU, but must not retain or mutate the original tensors.
     """
 
     sample_id: str
@@ -77,6 +79,26 @@ class AttentionProbeContext:
     query_dtype: torch.dtype
     key_dtype: torch.dtype
     dropout_p: float
+    value: Optional[torch.Tensor] = None
+
+
+@dataclass
+class KeyProjectionContext:
+    """Pre-RoPE K view [1,Hkv,q_len,D], valid only during this callback.
+
+    ``token_positions`` maps current projection rows to absolute Cache positions;
+    unlike the later Attention context, Decode contains only the new Key.
+    Callbacks should copy selected values to CPU, not retain the full tensor.
+    """
+
+    sample_id: str
+    phase: KVPhase
+    layer_id: int
+    forward_id: int
+    decode_step: Optional[int]
+    key_pre: torch.Tensor
+    token_positions: torch.Tensor
+    prompt_length: int
 
 
 @dataclass
@@ -108,6 +130,7 @@ class AttentionProbe:
         sample_id: str,
         prompt_length: int,
         on_attention: Callable[[AttentionProbeContext], None] | None = None,
+        on_key_projection: Callable[[KeyProjectionContext], None] | None = None,
     ) -> None:
         if not sample_id:
             raise ValueError("sample_id must be non-empty")
@@ -116,6 +139,7 @@ class AttentionProbe:
         self.sample_id = sample_id
         self.prompt_length = prompt_length
         self.on_attention = on_attention
+        self.on_key_projection = on_key_projection
         self.lifecycle = KVExecutionLifecycle()
         self.events: list[AttentionProbeEvent] = []
         self._handles: list[torch.utils.hooks.RemovableHandle] = []
@@ -179,6 +203,10 @@ class AttentionProbe:
             ALL_ATTENTION_FUNCTIONS[backend_name] = self._attention_wrapper
             for layer in layers:
                 self._handles.append(layer.self_attn.register_forward_pre_hook(self._pre_hook, with_kwargs=True))
+                if self.on_key_projection is not None:
+                    self._handles.append(layer.self_attn.k_proj.register_forward_hook(
+                        partial(self._key_projection_hook, layer.self_attn.layer_idx, layer.self_attn.head_dim)
+                    ))
         except Exception:
             self.detach()
             raise
@@ -251,6 +279,21 @@ class AttentionProbe:
             q_len=q_len,
         )
 
+    def _key_projection_hook(self, layer_id: int, head_dim: int, module: nn.Module, args, output) -> None:
+        metadata = self._active_calls[layer_id]
+        key_pre = output.view(1, metadata.q_len, -1, head_dim).transpose(1, 2)
+        self.on_key_projection(KeyProjectionContext(
+            sample_id=self.sample_id,
+            phase=metadata.phase,
+            layer_id=layer_id,
+            forward_id=metadata.forward_id,
+            decode_step=metadata.decode_step,
+            key_pre=key_pre,
+            token_positions=metadata.cache_position,
+            prompt_length=self.prompt_length,
+        ))
+        # Returning None preserves the original Linear output.
+
     def _attention_wrapper(
         self,
         module: nn.Module,
@@ -291,6 +334,7 @@ class AttentionProbe:
             query_dtype=query.dtype,
             key_dtype=key.dtype,
             dropout_p=float(dropout),
+            value=value,
         )
         self.events.append(
             AttentionProbeEvent(

@@ -14,5 +14,6 @@
 - [数据准备与输入验证](research/data_preparation.md)
 - [V1-B1：Attention 分布与时间行为](research/v1_b1_attention_analysis.md)
 - [V1-B2：Prefill 一致性与跨阶段关系](research/v1_b2_prefill_consistency.md)
+- [V2：KV Head 表示结构与 Attention 行为](research/v2_kv_representation.md)
 
 详细机器记录保留在结果包，运行方式见[实验 README](../experiments/head_analysis/README.md)。
