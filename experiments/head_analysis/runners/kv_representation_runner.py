@@ -12,7 +12,7 @@ import torch
 from experiments.head_analysis.collectors.kv_representation import (
     KVRepresentationCollector, KVRepresentationConfig, sample_positions,
 )
-from experiments.head_analysis.common.io import write_json
+from experiments.head_analysis.common.io import read_json, write_json
 from experiments.head_analysis.runners.b2_runner import (
     B1ReplaySample, _environment_metadata, _validate_execution_contract, emit_progress,
     load_b1_replay_index, load_replay_samples, teacher_forced_replay,
@@ -115,11 +115,16 @@ def run_collection(args: argparse.Namespace) -> int:
     directory = Path(args.run_dir)
     if directory.exists():
         raise FileExistsError(f"output already exists: {directory}")
-    emit_progress("v2_preflight_started", target_samples=len(args.sample_id))
+    sample_ids = args.sample_id
+    if getattr(args, "sample_ids_file", None) is not None:
+        sample_ids = read_json(Path(args.sample_ids_file))
+        if not isinstance(sample_ids, list) or any(not isinstance(sid, str) for sid in sample_ids):
+            raise ValueError("--sample-ids-file must contain a JSON list of sample ID strings")
+    emit_progress("v2_preflight_started", target_samples=len(sample_ids))
     index = load_b1_replay_index(args.run_set, source_root=args.source_root,
                                 expected_run_set_sha256=None, expected_data_sha256=None)
     _validate_execution_contract(index, args)
-    samples = load_replay_samples(index, args.sample_id)
+    samples = load_replay_samples(index, sample_ids)
     for sample in samples:
         replay_config(sample, args.block_size)
     emit_progress("v2_model_loading", model=str(args.model), device=args.device, dtype=args.dtype)
@@ -133,13 +138,15 @@ def run_collection(args: argparse.Namespace) -> int:
         "model": str(args.model), "tokenizer": str(args.tokenizer), "dtype": args.dtype,
         "model_class": type(model).__name__, "environment": _environment_metadata(device),
         "device": str(device), "attention_backend": "sdpa", "block_size": args.block_size,
-        "teacher_forced_replay": True, "target_sample_ids": list(args.sample_id),
+        "teacher_forced_replay": True, "target_sample_ids": list(sample_ids),
         "completed_sample_ids": [],
     }
     write_json(directory / "run_metadata.json", metadata)
-    for sample in samples:
+    started = time.perf_counter()
+    for sample_index, sample in enumerate(samples, 1):
         sample_id = sample.frozen_record["sample_id"]
         emit_progress("v2_sample_started", sample_id=sample_id,
+                      sample_index=sample_index, target_samples=len(samples),
                       prompt_length=frozen_length(sample.frozen_record),
                       b1_generated_length=len(sample.generated_ids))
         try:
@@ -153,6 +160,8 @@ def run_collection(args: argparse.Namespace) -> int:
         metadata["completed_sample_ids"].append(sample_id)
         write_json(directory / "run_metadata.json", metadata, overwrite=True)
         emit_progress("v2_sample_completed", sample_id=sample_id,
+                      completed_samples=sample_index, target_samples=len(samples),
+                      elapsed_seconds=round(time.perf_counter() - started, 3),
                       decode_forward_count=result["decode_forward_count"],
                       replay_wall_seconds=round(result["replay_wall_seconds"], 6))
     metadata["status"] = "completed"
@@ -165,7 +174,9 @@ def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-set", required=True, help="completed B1 run-set manifest")
     parser.add_argument("--source-root", default=".", help="root of B1 paths and frozen inputs")
-    parser.add_argument("--sample-id", action="append", required=True)
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--sample-id", action="append")
+    selection.add_argument("--sample-ids-file", type=Path, help="JSON list of sample IDs, in execution order")
     parser.add_argument("--model", required=True, help="same local model snapshot as B1")
     parser.add_argument("--tokenizer", required=True, help="B1 tokenizer path; inputs are not retokenized")
     parser.add_argument("--device", default="cuda:0")

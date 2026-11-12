@@ -217,6 +217,10 @@ def test_run_collection_assembles_selected_source_and_preserves_existing_output(
         model="tiny-model", tokenizer="tiny-model", device="cpu", dtype="bfloat16",
         block_size=97, run_dir=str(tmp_path / "run"),
     )
+    selection_path = tmp_path / "selected.json"
+    write_json(selection_path, ["tiny"])
+    args.sample_id = None
+    args.sample_ids_file = selection_path
     assert runner.run_collection(args) == 0
     metadata_path = tmp_path / "run/run_metadata.json"
     metadata = read_json(metadata_path)
@@ -235,6 +239,7 @@ def test_run_collection_assembles_selected_source_and_preserves_existing_output(
             entry.update(sha256=sha256(generated_path), file_bytes=generated_path.stat().st_size)
     write_json(b1_directory / "file_manifest.json", file_manifest)
     args.run_dir = str(tmp_path / "failed-run")
+    args.sample_id, args.sample_ids_file = ["tiny"], None
     assert runner.run_collection(args) == 1
     failed = read_json(tmp_path / "failed-run/run_metadata.json")
     assert failed["status"] == "failed" and failed["failed_sample_id"] == "tiny"

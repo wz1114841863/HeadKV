@@ -1,7 +1,7 @@
 # Head Analysis 实验代码
 
 本目录承载 HeadKV 的专用观测、采集和离线分析。B1/B2 正式 100 条采集及离线分析均已
-完成，当前推进 V2 小模型验证。目标和进展见[研究总览](../../docs/research/研究总览.md)；
+完成，V2 六条 Pilot 采集及离线分析也已完成核验。目标和进展见[研究总览](../../docs/research/研究总览.md)；
 方法与结果分别见 [B1](../../docs/research/v1_b1_attention_analysis.md)、
 [B2](../../docs/research/v1_b2_prefill_consistency.md) 和 [V2](../../docs/research/v2_kv_representation.md)。本文件只维护代码组织和使用方式。
 
@@ -14,7 +14,7 @@
 | `collectors/` | `attention_stats.py`：B1 基础统计；`prefill_consistency.py`、`b2_attention.py`：B2 参考及在线统计；`kv_representation.py`：V2 分块统计与位置抽样 |
 | `storage/` | `b1_reader.py`：B1 来源读取；`trace_writer.py`、`b2_trace_writer.py`：Attention 数据写入；`kv_representation.py`：V2 逐层读写及 BF16 位保存 |
 | `runners/` | `input_selection.py`：共用固定输入选择；`baseline_decode.py`、`b1_runner.py`、`b2_runner.py`、`kv_representation_runner.py`：模型调用与采集编排；`resource_metrics.py`：资源计量 |
-| `analysis/` | `b1_offline.py`、`page_rco.py`、`token_stability.py`、`metric_relationships.py`：B1 分析；`b2_consistency.py`、`b2_coverage.py`、`b2_relationships.py`、`b2_joint.py`：B2 来源、覆盖、关联与联合分析 |
+| `analysis/` | B1 分布与稳定性、B2 覆盖与关联；`kv_representation_metrics.py`：谱/CKA；`kv_representation.py`：V2 范围比较与 B1 对齐；`head_identity.py`：固定 Head 与跨输入变化 |
 | `scripts/` | 数据准备、模型下载、烟测、离线分析和结果整理的命令入口 |
 | `tests/` | 对应模块的 CPU 回归测试 |
 
@@ -78,11 +78,14 @@ V2 同样读取 B1 的冻结 `input_ids`，不重新分词或渲染 Prompt。按
   --sample-id govreport_8k_001 --run-dir data/runs/<new-v2-run>
 ```
 
-多条输入重复传 `--sample-id`；`--block-size` 只控制 CPU 统计分块，默认 1024。
+多条输入重复传 `--sample-id`，或改用 `--sample-ids-file <json>` 读取按执行顺序排列的
+样本 ID 字符串列表（两种选样方式互斥）；`--block-size` 只控制 CPU 统计分块，默认 1024。
 来源模型、dtype、SDPA 和 Tokenizer 必须与 B1 契约一致；沿用现有来源读取检查，不新增
 Git 状态检查或 Hash 清单。V2 的 Forward/回放计时**包含**同步统计和 NPZ 写入；另存 CUDA
 峰值显存（CPU 测试没有该项）。发生错误时停止后续样本，保留已完成及部分输出；已有目录
-拒绝覆盖，重新尝试使用新目录并显式选择待完成样本。以上命令为用法示例，尚未运行真实模型。
+拒绝覆盖，重新尝试使用新目录并显式选择待完成样本。进度输出包含样本序号、完成数/总数和耗时。
+目前六条 Pilot 均已完成，剩余 94 条沿用同一采集协议，按六个条件串行执行；
+结果位置、核验及资源开销见 [V2 报告](../../docs/research/v2_kv_representation.md)。
 
 新运行使用新目录。B1 工件由离线来源预检核验，B2 可调用 `validate_b2_run`；
 不以进程退出码代替完整性验收。RULER 可用 `scripts/validate_b1_ruler.py` 检查已保存答案。
@@ -99,6 +102,7 @@ Git 状态检查或 Hash 清单。V2 的 Forward/回放计时**包含**同步统
 | `scripts/analyze_b1_run_set.py` | `--run-stage3` 汇总 Query/Page；`--run-stage4` 计算 Token 稳定性；`--run-stage5 --stage3-dir ... --stage4-dir ...` 分析关联 |
 | `scripts/analyze_b2_run_set.py` | 默认只做来源预检；`--run-stage2` 汇总覆盖；`--run-stage3 --stage2-dir ...` 分析 CV/覆盖；`--run-stage4 --stage2-dir ... --stage3-dir ...` 联合 B1 |
 | `scripts/analyze_prefill_stability.py` | 以已有 B2 数值包探索 CV 对留出样本 Decode 稳定性的额外信息 |
+| `scripts/analyze_kv_representation.py` | 组合已完成 V2 Run，计算全量/抽样谱、448 位置 CKA 及置换参照，与已有 B1 RCO 对齐 |
 | `scripts/finalize_b1_analysis.py`、`finalize_b2_analysis.py` | 整理已验收数值和报告，创建新的统一完成包 |
 
 两个 Run Set 分析入口均需 `--run-set`、`--analysis-id` 和 `--output-dir`，可用
@@ -116,6 +120,35 @@ B2 阶段二用 `--scratch-dir` 指定数据盘上的临时缓冲父目录。
 整理过程检查阶段来源和样本坐标，将已有数值、参数和摘要复制到新目录，不重新计算指标。
 它不依赖历史审计文件，也不预设研究结论；模型下载脚本尊重现有 Hugging Face 环境变量。
 新结果使用 `headkv-v1-b2-numeric-bundle-v2` 标识，其文件布局和索引不同于历史冻结包。
+
+V2 离线分析读取逐层 CPU 数值和 B1 完成包，无需重新推理或 GPU。重复传入 `--run-dir`
+合并不同采集批次；默认全层、每层所有 KV Head 对、50 次单侧置换和 seed=20261111。
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.analyze_kv_representation \
+  --run-dir data/runs/v2_kv_govreport_8k_001_20261111_v1 \
+  --run-dir data/runs/v2_kv_pilot_remaining5_20261111_v1 \
+  --b1-bundle data/analysis/b1_full_100_completed_20261103_v2 \
+  --output-dir data/analysis/<new-v2-analysis>
+```
+
+输出 `summary.json`、`sample_summary.jsonl`、`permutations.npz` 和六个逐样本 NPZ；保留范围/N、
+有效标记、完整谱、原始 RCO/有效数及全部置换值。计算使用 FP64，大数组发布为 FP32，
+相关性输入矩阵保留 FP64 以精确重算；零方差保留无效，明显负谱报错。RULER 排除长期关系，
+只另存短轨迹描述。现有完成数值包位于 `data/analysis/v2_kv_pilot_6_20261111_v1/`，无需重跑。
+
+在该包上比较 Head 间差异与同一 Head 的输入变化，只读已有数值，不重算谱或 CKA：
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.analyze_head_identity \
+  --bundle data/analysis/v2_kv_pilot_6_20261111_v1 \
+  --output-dir data/analysis/<new-head-identity-analysis>
+```
+
+输出 `summary.json`、`profiles.npz` 和四个子集的 NPZ，保留 FP64 平方和分解、逐层份额、
+排序及来源组留出结果。PG19 两长度成组留出，并分别保留短/长代表作敏感性检查；
+原包和旧指标不变。当前结果为 `data/analysis/v2_head_identity_6_20261111_v1/`，
+方法和“固定统计画像不等于固定 PCA 基”的边界见 [V2 报告](../../docs/research/v2_kv_representation.md)。
 
 在已整理的 B2 原数值包上运行探索性逐样本留出分析（无需 GPU，不覆盖原包）：
 
