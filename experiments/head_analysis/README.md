@@ -132,7 +132,7 @@ V2 离线分析读取逐层 CPU 数值和 B1 完成包，无需重新推理或 G
   --output-dir data/analysis/<new-v2-analysis>
 ```
 
-输出 `summary.json`、`sample_summary.jsonl`、`permutations.npz` 和六个逐样本 NPZ；保留范围/N、
+输出 `summary.json`、`sample_summary.jsonl`、`permutations.npz` 和逐样本 NPZ；保留范围/N、
 有效标记、完整谱、原始 RCO/有效数及全部置换值。计算使用 FP64，大数组发布为 FP32，
 相关性输入矩阵保留 FP64 以精确重算；零方差保留无效，明显负谱报错。RULER 排除长期关系，
 只另存短轨迹描述。现有完成数值包位于 `data/analysis/v2_kv_pilot_6_20261111_v1/`，无需重跑。
@@ -149,6 +149,23 @@ V2 离线分析读取逐层 CPU 数值和 B1 完成包，无需重新推理或 G
 排序及来源组留出结果。PG19 两长度成组留出，并分别保留短/长代表作敏感性检查；
 原包和旧指标不变。当前结果为 `data/analysis/v2_head_identity_6_20261111_v1/`，
 方法和“固定统计画像不等于固定 PCA 基”的边界见 [V2 报告](../../docs/research/v2_kv_representation.md)。
+
+扩展验证先用上述谱/CKA 入口，仅传六个新增 Run（不含 Pilot），输出新的 94 条数值包。
+然后固定六条 Pilot，执行问题 A；长度条件和 Pair 直接读取冻结输入元数据，不按实际长度猜测：
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.analyze_head_identity \
+  --bundle data/analysis/v2_kv_remaining94_20261112_v1 \
+  --reference-bundle data/analysis/v2_kv_pilot_6_20261111_v1 \
+  --fixed-inputs data/fixed_v2/prompts.jsonl \
+  --bootstrap-replicates 2000 --seed 20261112 \
+  --output-dir data/analysis/v2_head_stability_a_94_20261112_v1
+```
+
+该模式只分析 K_post/V 的秩、E16、平均 Norm（完整中段主指标及同 448 位置敏感性检查），
+输出固定参考评估、输入对排序、来源 Bootstrap 及分解数值，不更新参考、不覆盖原包。
+PG19 两长度共用 Pair 抽样，参考不重采样；条件等权 CI 用于固定参考的逐输入评估，
+输入对仅报告描述性分布。完整公式、统计范围和输出路径见 V2 报告第 11.5 节。
 
 在已整理的 B2 原数值包上运行探索性逐样本留出分析（无需 GPU，不覆盖原包）：
 

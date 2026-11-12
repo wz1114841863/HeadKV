@@ -7,8 +7,11 @@ from pathlib import Path
 import numpy as np
 
 from experiments.head_analysis.analysis.kv_representation import _json_value, correlate_heads, describe
-from experiments.head_analysis.common.io import read_json, write_json, write_npz
-from experiments.head_analysis.common.statistics import correlation_1d, finite_mean
+from experiments.head_analysis.common.io import iter_jsonl, read_json, write_json, write_npz
+from experiments.head_analysis.common.statistics import (
+    average_ranks, bootstrap_draws, bootstrap_means, correlation_1d, finite_mean,
+    pearson, percentile_ci,
+)
 
 
 FEATURE_SPECS = (
@@ -23,6 +26,11 @@ FEATURE_SPECS = (
     *((f"cka_{rep}_head_{field}", f"cka_{rep}_head_{field}", None)
       for rep in ("k_pre", "k_post", "v") for field in ("observed", "excess")),
     ("rope_middle_rank_post_pre_ratio", "rope_middle_rank_post_pre_ratio", None),
+)
+
+A_FEATURE_SPECS = FEATURE_SPECS[:6] + tuple(
+    (name.replace("full_", "sample_", 1), key.replace("full_", "sample_", 1), column)
+    for name, key, column in FEATURE_SPECS[:6]
 )
 
 
@@ -152,11 +160,9 @@ def _cohorts(samples):
     return result
 
 
-def run_analysis(bundle: Path, output_dir: Path):
-    """Read the completed V2 numeric package without model, raw K/V or new CKA."""
-    bundle, output_dir = Path(bundle), Path(output_dir)
-    if output_dir.exists():
-        raise FileExistsError(f"output already exists: {output_dir}")
+def load_profiles(bundle: Path, feature_specs=FEATURE_SPECS):
+    """Read published features with their sample and physical Head coordinates."""
+    bundle = Path(bundle)
     source = read_json(bundle / "summary.json")
     samples = source["samples"]
     if source["status"] != "completed":
@@ -173,10 +179,20 @@ def run_analysis(bundle: Path, output_dir: Path):
             elif not (np.array_equal(layers, arrays["layer_ids"]) and np.array_equal(heads, arrays["kv_head_ids"])):
                 raise ValueError("Layer/KV Head coordinates differ across samples")
             values.append(np.stack([arrays[key] if index is None else arrays[key][..., index]
-                                    for _, key, index in FEATURE_SPECS]).astype(np.float64))
+                                    for _, key, index in feature_specs]).astype(np.float64))
     profiles = np.stack(values, axis=1)
     if profiles.shape[2:] != (len(layers), len(heads)):
         raise ValueError("feature arrays differ from their Layer/KV Head coordinates")
+    return source, profiles, layers, heads
+
+
+def run_analysis(bundle: Path, output_dir: Path):
+    """Read the completed V2 numeric package without model, raw K/V or new CKA."""
+    bundle, output_dir = Path(bundle), Path(output_dir)
+    if output_dir.exists():
+        raise FileExistsError(f"output already exists: {output_dir}")
+    source, profiles, layers, heads = load_profiles(bundle)
+    samples, ids = source["samples"], source["sample_ids"]
     datasets = np.asarray([sample["dataset"] for sample in samples])
     groups = np.asarray([f"pg19:{sample['pair_id']}" if sample["dataset"] == "pg19"
                          else f"{sample['dataset']}:{sample['sample_id']}" for sample in samples])
@@ -238,6 +254,212 @@ def run_analysis(bundle: Path, output_dir: Path):
             "sample_ids": np.asarray(summary["sample_ids"]),
             **{key: np.asarray(value) for key, value in numeric.items()}})
         result["cohorts"].append(_json_value(summary))
+    result["status"] = "completed"
+    write_json(output_dir / "summary.json", result, overwrite=True)
+    return result
+
+
+def fixed_reference_comparison(reference, targets):
+    """Freeze the reference Head contrasts; targets only determine evaluation support."""
+    frozen = decompose_profiles(reference)
+    targets = np.asarray(targets, dtype=np.float64)
+    if targets.ndim != 3 or targets.shape[1:] != frozen["head_effect"].shape:
+        raise ValueError("reference and targets require matching Layer/KV Head axes")
+    valid = np.isfinite(targets) & np.isfinite(frozen["head_effect"])[None]
+    x = np.where(valid, targets, np.nan)
+    prediction = np.where(valid, frozen["head_effect"][None], np.nan)
+    layer_mean = finite_mean(x, -1)
+    centered = x - layer_mean[..., None]
+    prediction = prediction - finite_mean(prediction, -1)[..., None]
+    per_layer_rho, per_layer_count = pearson(average_ranks(prediction), average_ranks(centered))
+    samples = len(x)
+    rho, count = pearson(average_ranks(prediction.reshape(samples, -1)),
+                         average_ranks(centered.reshape(samples, -1)))
+    error = np.nansum((prediction - centered) ** 2, axis=-1)
+    baseline = np.nansum(centered ** 2, axis=-1)
+    per_layer_skill = np.full_like(error, np.nan)
+    np.divide(error, baseline, out=per_layer_skill, where=baseline > 0)
+    skill = np.full(samples, np.nan)
+    np.divide(error.sum(-1), baseline.sum(-1), out=skill, where=baseline.sum(-1) > 0)
+    return {"reference_profile": frozen["head_effect"], "reference_layer_mean": frozen["layer_baseline"],
+            "target_layer_mean": layer_mean, "rho": rho, "per_layer_rho": per_layer_rho,
+            "valid_count": count, "per_layer_valid_count": per_layer_count,
+            "skill": 1 - skill, "per_layer_skill": 1 - per_layer_skill,
+            "per_layer_error": error, "per_layer_baseline": baseline}
+
+
+def input_pair_correlations(values):
+    """Batched upper-triangle correlations with pairwise finite Head support."""
+    values = np.asarray(values, dtype=np.float64)
+    i, j = np.triu_indices(len(values), 1)
+    valid = np.isfinite(values[i]) & np.isfinite(values[j])
+    left, right = np.where(valid, values[i], np.nan), np.where(valid, values[j], np.nan)
+    layer_rho, layer_count = pearson(average_ranks(left), average_ranks(right))
+    left = left - finite_mean(left, -1)[..., None]
+    right = right - finite_mean(right, -1)[..., None]
+    rho, count = pearson(average_ranks(left.reshape(len(i), -1)),
+                         average_ranks(right.reshape(len(i), -1)))
+    return {"pair_indices": np.stack((i, j), -1), "rho": rho, "valid_count": count,
+            "per_layer_rho": layer_rho, "per_layer_valid_count": layer_count}
+
+
+def reference_bootstrap(values, conditions, datasets, groups, *, replicates=2000, seed=20261112):
+    """Bootstrap fixed-reference scores by source; PG19 lengths share Pair draws.
+
+    values[Sample,Feature,Metric] contain per-input scores, never Head or input-pair
+    observations. The reference itself is not refitted or resampled.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    conditions, datasets, groups = map(np.asarray, (conditions, datasets, groups))
+    labels = sorted(set(conditions.tolist()))
+    numeric, points, draws_by_stratum, group_ids, draws = {}, [], {}, {}, []
+    valid_counts = []
+    for condition in labels:
+        indices = np.flatnonzero(conditions == condition)
+        stratum = "pg19" if datasets[indices[0]] == "pg19" else condition
+        source_ids = sorted(set(groups[indices].tolist()))
+        if stratum not in draws_by_stratum:
+            group_ids[stratum] = source_ids
+            draws_by_stratum[stratum] = bootstrap_draws(seed, f"v2-a:{stratum}", replicates, len(source_ids))
+            numeric[f"draws_{stratum}"] = draws_by_stratum[stratum]
+            numeric[f"group_ids_{stratum}"] = np.asarray(source_ids)
+        elif group_ids[stratum] != source_ids:
+            raise ValueError("PG19 length conditions must contain the same source Pairs")
+        grouped = np.stack([finite_mean(values[indices[groups[indices] == group]], 0) for group in source_ids])
+        points.append(finite_mean(grouped, 0))
+        valid_counts.append(np.isfinite(grouped).sum(0))
+        draws.append(bootstrap_means(grouped, draws_by_stratum[stratum]))
+    samples = np.stack(draws, axis=1)  # Bootstrap,Condition,Feature,Metric
+    point = np.stack(points)
+    ci, count = percentile_ci(samples)
+    equal_samples = finite_mean(samples, 1)
+    equal_ci, equal_count = percentile_ci(equal_samples)
+    return {**numeric, "condition_names": np.asarray(labels), "condition_mean": point,
+            "condition_ci95": ci, "condition_valid_replicates": count,
+            "condition_valid_source_count": np.asarray(valid_counts, dtype=np.uint32),
+            "condition_bootstrap_means": samples, "equal_condition_mean": finite_mean(point, 0),
+            "equal_condition_ci95": equal_ci, "equal_condition_valid_replicates": equal_count,
+            "equal_condition_valid_condition_count": np.isfinite(point).sum(0).astype(np.uint32)}
+
+
+def run_reference_analysis(bundle, reference_bundle, output_dir, *, fixed_inputs,
+                           bootstrap_replicates=2000, seed=20261112):
+    """Question A: new inputs compared with an immutable Pilot reference."""
+    bundle, reference_bundle, output_dir = map(Path, (bundle, reference_bundle, output_dir))
+    if output_dir.exists():
+        raise FileExistsError(f"output already exists: {output_dir}")
+    source, values, layers, heads = load_profiles(bundle, A_FEATURE_SPECS)
+    reference, ref_values, ref_layers, ref_heads = load_profiles(reference_bundle, A_FEATURE_SPECS)
+    if not (np.array_equal(layers, ref_layers) and np.array_equal(heads, ref_heads)):
+        raise ValueError("reference and target Layer/KV Head coordinates differ")
+    for key in ("definitions", "seed", "permutation_replicates"):
+        if source.get(key) != reference.get(key):
+            raise ValueError(f"reference and target metric protocols differ: {key}")
+    for key in ("model", "dtype", "attention_backend"):
+        if source.get("sources", [{}])[0].get(key) != reference.get("sources", [{}])[0].get(key):
+            raise ValueError(f"reference and target models differ: {key}")
+    ids, ref_ids = source["sample_ids"], reference["sample_ids"]
+    if set(ids) & set(ref_ids):
+        raise ValueError("reference and target sample IDs overlap")
+    fixed = {row["sample_id"]: row for row in iter_jsonl(Path(fixed_inputs))}
+
+    def labels(sample_ids):
+        records = [fixed[sid] for sid in sample_ids]
+        datasets = np.asarray([r["dataset"] for r in records])
+        conditions = np.asarray([f"{r['dataset']}_{r['target_prompt_length']}" for r in records])
+        groups = np.asarray([f"pg19:{r['pair_id']}" if r["dataset"] == "pg19"
+                             else f"{r['dataset']}:{r['sample_id']}" for r in records])
+        return datasets, conditions, groups
+
+    datasets, conditions, groups = labels(ids)
+    _, _, ref_groups = labels(ref_ids)
+    if set(groups) & set(ref_groups):
+        raise ValueError("reference and target source groups overlap")
+    names = [spec[0] for spec in A_FEATURE_SPECS]
+    result = {"schema_version": "headkv-v2-fixed-reference-a-v1", "status": "running",
+              "source_bundle": str(bundle.resolve()), "reference_bundle": str(reference_bundle.resolve()),
+              "fixed_inputs": str(Path(fixed_inputs).resolve()), "sample_ids": ids,
+              "reference_sample_ids": ref_ids, "feature_names": names, "cohorts": [], "features": [],
+              "bootstrap_replicates": bootstrap_replicates, "seed": seed,
+              "definitions": {
+                  "features": "first six: full middle K_post/V rank, E16, mean Norm; last six: same 448 middle rows",
+                  "reference": "mean of Pilot input-layer centered profiles; fixed before target evaluation",
+                  "skill": "1-SSE_reference/SSE_uniform_Head, negative retained; targets supply their own layer means",
+                  "pairwise": "each Layer's Head Spearman plus pooled layer-centered Spearman; pairwise finite support",
+                  "decomposition": "existing descriptive within-layer SS decomposition; not population variance or ICC",
+                  "bootstrap": "source groups within condition; PG19 lengths share Pair draws; Pilot fixed, not resampled",
+                  "aggregate": "condition-equal mean of source-equal per-condition reference scores; percentile 95% CI",
+                  "pairwise_inference": "input-pair correlations are descriptive distributions without CI or independent-pair inference",
+                  "scope": "relative Head profiles in one fixed model; no absolute prediction, PCA-basis or compression claim"}}
+    output_dir.mkdir(parents=True)
+    write_json(output_dir / "summary.json", result)
+    coordinates = {"feature_names": np.asarray(names), "sample_ids": np.asarray(ids),
+                   "reference_sample_ids": np.asarray(ref_ids), "layer_ids": layers, "kv_head_ids": heads}
+    write_npz(output_dir / "profiles.npz", {**coordinates, "values": values, "reference_values": ref_values,
+              "datasets": datasets, "conditions": conditions, "source_groups": groups})
+    comparison, pairs = defaultdict(list), defaultdict(list)
+    for name, target, ref in zip(names, values, ref_values):
+        fixed_result = fixed_reference_comparison(ref, target)
+        pair_result = input_pair_correlations(target)
+        for key, value in fixed_result.items():
+            comparison[key].append(value)
+        for key, value in pair_result.items():
+            if key != "pair_indices":
+                pairs[key].append(value)
+        result["features"].append({"feature": name, "primary": name.startswith("full_"),
+            "reference_layer_centered_spearman": describe(fixed_result["rho"]),
+            "reference_per_layer_spearman": describe(fixed_result["per_layer_rho"]),
+            "reference_skill": describe(fixed_result["skill"])})
+        print(f"V2 A feature completed: {name}", flush=True)
+    comparison = {key: np.asarray(value) for key, value in comparison.items()}
+    pair_arrays = {key: np.asarray(value) for key, value in pairs.items()}
+    i, j = pair_result["pair_indices"].T
+    pair_groups = {"all_pairs": np.ones(len(i), dtype=bool), "same_condition": conditions[i] == conditions[j],
+                   "cross_task": datasets[i] != datasets[j],
+                   "same_task_different_length": (datasets[i] == datasets[j]) & (conditions[i] != conditions[j]),
+                   "pg19_paired_lengths": (datasets[i] == "pg19") & (groups[i] == groups[j])}
+    for feature, summary in enumerate(result["features"]):
+        summary["input_pair_groups"] = {name: {"input_pair_count": int(mask.sum()),
+            "layer_centered_spearman": describe(pair_arrays["rho"][feature, mask]),
+            "per_layer_spearman": describe(pair_arrays["per_layer_rho"][feature, mask])}
+            for name, mask in pair_groups.items()}
+    write_npz(output_dir / "fixed_reference.npz", {**coordinates, **comparison})
+    write_npz(output_dir / "input_pairs.npz", {**coordinates, **pair_arrays, "pair_indices": pair_result["pair_indices"],
+              **{f"group_{name}": mask for name, mask in pair_groups.items()}})
+    scores = np.stack((finite_mean(comparison["per_layer_rho"], -1), comparison["rho"], comparison["skill"]), -1)
+    bootstrap = reference_bootstrap(scores.transpose(1, 0, 2), conditions, datasets, groups,
+                                    replicates=bootstrap_replicates, seed=seed)
+    score_names = ["mean_layer_spearman", "layer_centered_spearman", "relative_profile_skill"]
+    write_npz(output_dir / "bootstrap.npz", {"feature_names": np.asarray(names), "metric_names": np.asarray(score_names), **bootstrap})
+    result["fixed_reference_bootstrap"] = _json_value({key: value for key, value in bootstrap.items()
+        if key in ("condition_names", "condition_mean", "condition_ci95", "condition_valid_source_count",
+                   "condition_valid_replicates", "equal_condition_mean", "equal_condition_ci95",
+                   "equal_condition_valid_replicates", "equal_condition_valid_condition_count")})
+    result["fixed_reference_bootstrap"]["metric_names"] = score_names
+    # Store decomposition effects and SS, reusing values to reconstruct centered/residual arrays.
+    cohorts = [("extension", np.arange(len(ids))), *_cohorts(source["samples"])[1:]]
+    cohorts.extend((f"condition_{condition}", np.flatnonzero(conditions == condition)) for condition in sorted(set(conditions)))
+    for label, indices in cohorts:
+        numeric, summary = defaultdict(list), {"name": label, "sample_ids": [ids[i] for i in indices],
+                                              "numeric_file": f"{label}.npz", "features": []}
+        for name, feature in zip(names, values[:, indices]):
+            decomposition = decompose_profiles(feature)
+            for key, value in decomposition.items():
+                if key in ("centered", "residual"):
+                    continue
+                if isinstance(value, dict):
+                    for subkey, subvalue in value.items():
+                        numeric[f"{key}_{subkey}"].append(subvalue)
+                else:
+                    numeric[key].append(value)
+            summary["features"].append({"feature": name, "shares": decomposition["shares"],
+                "relative_fixed_share": decomposition["relative_fixed_share"],
+                "per_layer_relative_fixed_share": describe(decomposition["per_layer_relative_fixed_share"]),
+                "within_to_between_rms_ratio": _ratio(decomposition["within_head_input_rms"], decomposition["between_head_rms"])})
+        write_npz(output_dir / summary["numeric_file"], {"feature_names": np.asarray(names), "sample_indices": indices,
+                  **{key: np.asarray(value) for key, value in numeric.items()}})
+        result["cohorts"].append(_json_value(summary))
+    result = _json_value(result)
     result["status"] = "completed"
     write_json(output_dir / "summary.json", result, overwrite=True)
     return result
