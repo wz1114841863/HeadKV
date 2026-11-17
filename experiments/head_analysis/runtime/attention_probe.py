@@ -99,6 +99,7 @@ class KeyProjectionContext:
     key_pre: torch.Tensor
     token_positions: torch.Tensor
     prompt_length: int
+    position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 @dataclass
@@ -109,6 +110,7 @@ class _ForwardMetadata:
     decode_step: Optional[int]
     cache_position: torch.Tensor
     q_len: int
+    position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 _PROBE_LOCK = threading.RLock()
@@ -131,15 +133,20 @@ class AttentionProbe:
         prompt_length: int,
         on_attention: Callable[[AttentionProbeContext], None] | None = None,
         on_key_projection: Callable[[KeyProjectionContext], None] | None = None,
+        decode_step_offset: int = 0,
     ) -> None:
         if not sample_id:
             raise ValueError("sample_id must be non-empty")
         if prompt_length <= 0:
             raise ValueError("prompt_length must be positive")
+        if decode_step_offset < 0:
+            raise ValueError("decode_step_offset must be nonnegative")
         self.sample_id = sample_id
         self.prompt_length = prompt_length
         self.on_attention = on_attention
         self.on_key_projection = on_key_projection
+        # An isolated checkpoint Forward can start after earlier Decode steps.
+        self.decode_step_offset = decode_step_offset
         self.lifecycle = KVExecutionLifecycle()
         self.events: list[AttentionProbeEvent] = []
         self._handles: list[torch.utils.hooks.RemovableHandle] = []
@@ -255,6 +262,8 @@ class AttentionProbe:
         metadata = self.lifecycle.observe(cache_position, q_len, layer_id)
         phase = metadata["phase"]
         decode_step = metadata["decode_step"]
+        if decode_step is not None:
+            decode_step += self.decode_step_offset
         first_position = int(cache_position[0].item())
         last_position = int(cache_position[-1].item())
 
@@ -277,6 +286,7 @@ class AttentionProbe:
             decode_step=decode_step,
             cache_position=cache_position,
             q_len=q_len,
+            position_embeddings=kwargs.get("position_embeddings") if self.on_key_projection else None,
         )
 
     def _key_projection_hook(self, layer_id: int, head_dim: int, module: nn.Module, args, output) -> None:
@@ -291,6 +301,7 @@ class AttentionProbe:
             key_pre=key_pre,
             token_positions=metadata.cache_position,
             prompt_length=self.prompt_length,
+            position_embeddings=metadata.position_embeddings,
         ))
         # Returning None preserves the original Linear output.
 

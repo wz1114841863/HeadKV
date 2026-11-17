@@ -167,6 +167,51 @@ V2 离线分析读取逐层 CPU 数值和 B1 完成包，无需重新推理或 G
 PG19 两长度共用 Pair 抽样，参考不重采样；条件等权 CI 用于固定参考的逐输入评估，
 输入对仅报告描述性分布。完整公式、统计范围和输出路径见 V2 报告第 11.5 节。
 
+问题 B 直接使用这两个谱包，比较相同 448 位置上的 RoPE 秩变化，无需原始 K/V 或 GPU：
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.analyze_rope_stability \
+  --bundle data/analysis/v2_kv_remaining94_20261112_v1 \
+  --reference-bundle data/analysis/v2_kv_pilot_6_20261111_v1 \
+  --sample-index data/analysis/b2_full_100_completed_20261110_v1/sample_index.json \
+  --output-dir data/analysis/v2_rope_stability_b_100_20261113_v1
+```
+
+长度和 Pair 读取已有样本索引；输出逐输入秩变化、逐 Layer/Head 的跨输入统计、固定参考排序、
+输入对排序、配对长度差和来源 Bootstrap。默认 2,000 次、seed=20261112，保留原包；
+主要报告新增 94 条，Pilot 与合并 100 条分开保留。方法及结果见 V2 报告第 11.7 节。
+
+问题 C 比较每层 28 个 Head 对的 CKA 排序与 Pilot 高相似配对的保持情况，仅读取已发布值：
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.analyze_cka_stability \
+  --bundle data/analysis/v2_kv_remaining94_20261112_v1 \
+  --reference-bundle data/analysis/v2_kv_pilot_6_20261111_v1 \
+  --sample-index data/analysis/b2_full_100_completed_20261110_v1/sample_index.json \
+  --output-dir data/analysis/v2_cka_stability_c_100_20261113_v1
+```
+
+默认固定 Pilot 均值前 7 对，Observed/Excess 分开；保留逐层排序、Top-7 保留率、输入对及三种表示比较。
+三份 `matrices_k_pre/k_post/v.npz` 分别保存每层 8×8 对称关系矩阵，`mean/std/top_k_frequency`
+轴为 `[cohort,kind,layer,head,head]`，`kind` 为 Observed/Excess，名称和坐标均在同文件；
+对角线未测量，保持 NaN。Bootstrap 沿用按来源抽样、PG19 Pair 成组及六条件等权，不重算 SVD/CKA。
+结果与限制见 V2 报告第 11.8 节。
+
+问题 D 联合 V2 表示和 B1 Page RCO，使用已核验的 B2 数值包内的 B1 副本交叉核对：
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.analyze_attention_kv_joint \
+  --bundle data/analysis/v2_kv_remaining94_20261112_v1 \
+  --reference-bundle data/analysis/v2_kv_pilot_6_20261111_v1 \
+  --b2-bundle data/analysis/b2_full_100_completed_20261110_v1 \
+  --output-dir data/analysis/v2_attention_kv_joint_d_100_20261113_v1
+```
+
+全部 100 条对齐；长期关联适用 60 条，新增 56 条为主要报告对象，RULER 保留坐标及不适用状态。
+输出 D1 的逐输入/逐层相关与方向、D2 各条件的固定画像/输入残差及分解数值。
+默认 2,000 次来源 Bootstrap；D2 每次重新估计 Head 均值，PG19 两长度共用 Pair 抽样。
+仅用 CPU 和已有数值，不重算模型、谱、CKA 或 RCO；方法及结果见 V2 报告第 11.9 节。
+
 在已整理的 B2 原数值包上运行探索性逐样本留出分析（无需 GPU，不覆盖原包）：
 
 ```bash
@@ -190,6 +235,177 @@ Prefill/Decode 采集行为不变。Page RCO 与 Token 稳定性的样本均值 
 
 方法定义和主结果直接阅读阶段报告；完整参数及数组轴在完成包的指标和数值索引中。
 已冻结包中的旧文档和源码保持原样，重现旧版本行为使用包内源码快照。
+
+## V3-A 离线重建
+
+读取远端既有 V2 原始工件，不运行模型。三个阶段依次执行：
+
+```bash
+OPENBLAS_NUM_THREADS=8 .venv/bin/python -m experiments.head_analysis.scripts.analyze_kv_reconstruction \
+  prepare --run-dir data/runs/<V2批次1> --run-dir data/runs/<V2批次2> \
+  --fixed-inputs data/fixed_v2/prompts.jsonl --output-dir data/analysis/<新目录>
+
+OPENBLAS_NUM_THREADS=8 .venv/bin/python -m experiments.head_analysis.scripts.analyze_kv_reconstruction \
+  validation --output-dir data/analysis/<同一新目录> --threads 8
+
+OPENBLAS_NUM_THREADS=8 .venv/bin/python -m experiments.head_analysis.scripts.analyze_kv_reconstruction \
+  test --output-dir data/analysis/<同一新目录> --threads 8
+```
+
+`prepare` 的 `--run-dir` 可重复，须合计覆盖固定 100 条；该阶段先冻结 `split.json`，
+再实际读取所有原始层工件，检查两范围 moments 和 512 位置向量，不计算重建误差。
+`validation` 只用 Calib 拟合，完成 A1～A3、同位置 BF16 及 RoPE 补充后写入
+`validation_freeze.json`；`test` 必须在冻结后单独启动，不重新拟合或选择方法。
+已有拟合、评估不能原地重跑，独立尝试使用新目录，避免覆盖已冻结结果。
+
+`analysis/pca_reconstruction.py` 负责均值、基及误差公式，
+`analysis/kv_representation_budget.py` 负责维度分配和完整字节账本，
+`storage/representation_inputs.py` 负责已有输入的读取和划分，
+`analysis/kv_reconstruction.py` 组装阶段流程。输出保留逐输入误差、来源 Bootstrap、
+字节账本、实际 FP32 参数载荷及阶段报告；全量理想误差和 448 位置 BF16 实测分开。
+方法、门槛和结果见 [V3 报告](../../docs/research/v3_head_aware_kv_optimization.md)。
+
+方向一的子空间诊断读取原 V2 moments，复用冻结的 V3 均值、尺度和基，仅使用 CPU：
+
+```bash
+OPENBLAS_NUM_THREADS=8 .venv/bin/python -m experiments.head_analysis.scripts.analyze_kv_subspace_diagnostic \
+  --bundle data/analysis/v3_a_20261113_v1 \
+  --output-dir data/analysis/v3_a_subspace_diagnostic_<新版本> --threads 8
+```
+
+`analysis/pca_subspace.py` 负责几何量与有符号误差分解，
+`analysis/kv_subspace_diagnostic.py` 负责逐层读取、A1 复现、输入对及来源 Bootstrap。
+`layers/` 保留逐坐标数值与 G/M、G_C/C 的双端谱边界，`head_summary.npz` 保存各组
+Head 汇总，`bootstrap.npz` 保存共用来源抽样和总体区间；理论非负损失的小负值原样保存并标记。
+固定基相对逐输入 Oracle 的差距包含 Calib 内折中，不能全部称为泛化失败。说明见 V3 报告第 15 节。
+
+## V3 Pre-RoPE Key 旁路编码
+
+入口复用原 B1 固定输入/轨迹和 V3 冻结参数,模型继续使用 Dense Cache:
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.run_key_encoding \
+  --bundle data/analysis/v3_a_20261113_v1 \
+  --run-set data/runs/b1_full_100_20261029_v1.manifest.json --source-root . \
+  --model <snapshot> --tokenizer <snapshot> --device cuda:4 \
+  --cohort pilot --run-dir data/analysis/v3_pre_rope_pilot_<版本>/pilot
+```
+
+`pilot` 固定为原六条 Calib Pilot;核验其完成后,才使用 `--cohort validation`
+和 `--pilot-dir <已完成的pilot目录>` 执行计划中的六条 Validation,结果写入另一目录.
+已有目录不会覆盖,中断后保留失败现场;不自动转入 Validation 或更换输入.
+
+`runtime/key_codec.py` 负责编码/恢复/字节账本,
+`collectors/key_encoding.py` 负责完整中段/连续 Decode 的只读核验,
+`runners/key_encoding_runner.py` 组装现有 Probe/回放/统计和通用落盘函数.
+Probe 只补充实际 position_embeddings;没有改模型前向或 KV Cache 实现.
+结果包括逐层 K_pre moments、两路径理想/BF16 误差、Decode BF16 系数位、检查点恢复成本及摘要.
+恢复成本使用真实形状和重复的抽样系数做独立算子测量,不是压缩模型 Decode 延迟.
+
+本地相关检查见 `tests/test_key_encoding.py`;远端 tmux 中可设置
+`HEADKV_TEST_DEVICE=cuda:4` 运行同一测试,无需下载模型.
+研究范围和精度区别见 [V3 报告第 16 节](../../docs/research/v3_head_aware_kv_optimization.md#16-方向二短期方案pre-rope-key-的完整编码与恢复已批准).
+
+## Pre-RoPE Head 差异化预算离线探索
+
+复用上述已完成的六条 Pilot/六条 Validation,不加载模型、不新增采集:
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.analyze_pre_rope_head_budget \
+  --bundle data/analysis/v3_a_20261113_v1 \
+  --codec-root data/analysis/v3_pre_rope_pilot_20261116_v1 \
+  --output-dir data/analysis/v3_pre_rope_head_budget_<新版本> --threads 4
+```
+
+`analysis/pre_rope_head_budget.py` 组合已有投影误差、Head 画像、离散分配和编码函数。
+先用 Calib 完整中段曲线冻结 Pre/Post 分配,再评估 Validation;均值/基保持不变。
+输出完整中段理想误差、同 448 位置 BF16 误差、稳定性、实际参数载荷和字节账本。
+两种范围分别报告,不作为实际 Cache 干预或推理性能结果;具体口径见 V3 报告第 17 节。
+
+## Pre-RoPE 跨 Head 共享基对照
+
+入口复用既有六条 Calib/六条 Validation 工件,输出独立的共享基分析数值包。
+应在能读取原 `split.json` 所引用 V2 原始向量的主机上运行;目前这些路径位于远端。
+仅需 CPU,无需加载模型:
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.analyze_pre_rope_shared_basis \
+  --bundle data/analysis/v3_a_20261113_v1 \
+  --codec-root data/analysis/v3_pre_rope_pilot_20261116_v1 \
+  --cka-bundle data/analysis/v2_kv_pilot_6_20261111_v1 \
+  --output-dir data/analysis/v3_pre_rope_shared_basis_20261116_v1 --threads 4
+```
+
+输出目录须不存在,重复运行请更换版本。
+`analysis/pre_rope_shared_basis.py` 复用 PCA/编码/读取函数,仅用六条 Calib 拟合新逐 Head 基、
+两 Head 共享基及索引/CKA/重建代价三种配对,冻结参数和分组后再读取 Validation 数值。
+均值/归一化尺度沿用旧参数;旧逐 Head 基单列参照,不将重新拟合的变化归为共享收益。
+共享基按组导出一次,实际 BF16 参考编码使用回读的参数和映射。
+结果包含完整中段理想误差、同 448 位置最终 K_post 误差、配对诊断及模型/请求字节账本。
+r128 只作数值检查,不参与候选选择;具体范围见 V3 报告第 18 节。
+
+## Dense KV 存储模拟
+
+按 [V3 第 20 节](../../docs/research/v3_head_aware_kv_optimization.md#20-最小-dense-存储模拟计划2026-11-17)
+执行固定六条 Calib/六条 Validation,仅使用 CPU,不加载模型或改变 Attention:
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.simulate_dense_kv_memory \
+  --run-set data/runs/b1_full_100_20261029_v1.manifest.json --source-root . \
+  --bundle data/analysis/v3_a_20261113_v1 \
+  --b1-bundle data/analysis/b1_full_100_completed_20261103_v2 \
+  --codec-root data/analysis/v3_pre_rope_pilot_20261116_v1 \
+  --output-dir data/analysis/v3_dense_memory_20261117_v1
+```
+
+来源路径须可读,当前完整 B1 数据在远端.输出目录必须为新目录.
+`analysis/dense_kv_memory.py` 包含小序列逐请求参考和满足条件的精确扫描计数,
+复用 B1 Reader、固定输入分组、条件权重和公共 I/O.默认比较六策略/三容量,
+画像只来自原 36 条长文本 Calib,先核对 Calib 再保存冻结配置/配额,之后评估 Validation.
+结果为配置、画像/uint32 配额、两阶段 CSV、紧凑逐 Head 整数计数及摘要,不展开巨量请求事件.
+计数反映明确假设下的存储模型;参数化搬运时间不是真实模型延迟或硬件实测.
+上述 v1 数值包已完成并核验,再次运行须使用新版本目录;首轮结果见报告第 20.10 节.
+
+## Head 级量化敏感性
+
+[V3 第 21 节](../../docs/research/v3_head_aware_kv_optimization.md#21-v3-b-小规模方案全-token-dense-下的-head-级量化敏感性已批准)
+的量化、单 Head 干预、全 Head 局部统计及落盘链路已完成小模型验证，尚未启动真实模型实验。
+`runtime/kv_quantization.py` 提供 K/V 分开的 4/8 bit 编码、实际打包/恢复与布局字节账本；
+`runtime/head_intervention.py` 仅替换目标 Attention 输入副本，不改原 Cache 或只读 Probe。
+`runners/quantization_runner.py` 的 `replay_quantization_checkpoints` 接受原 Prompt/生成 ID，
+以及 `{decode_step: [HeadIntervention(...), ...]}`；复用原固定回放，只 Prefill 一次，
+逐个执行并恢复检查点分支。`bits=None` 为旁路对照，`side` 为 `key` 或 `value`。
+分支预测允许变化，原主回放继续核对 B1 预测。
+
+`collectors/quantization_sensitivity.py` 逐 Head 计算全域 Attention 误差；
+`storage/quantization_results.py` 保存每检查点的紧凑 NPZ、模型分支结果、字节及资源汇总，
+不保存完整 Attention、Q/K/V、词表 Logits 或分支 Cache。
+目前仅支持标准非 offload DynamicCache。
+量化布局预算与旁路研究进程的实际显存分开；恢复引用不代表 Cache 追加没有分配开销。
+
+正式运行入口如下，模型权重须已在本机；这是命令示例，本轮尚未运行正式数据：
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.run_quantization_sensitivity \
+  --bundle data/analysis/v3_a_20261113_v1 \
+  --run-set data/runs/b1_full_100_20261029_v1.manifest.json --source-root . \
+  --model /模型快照路径 --tokenizer /模型快照路径 \
+  --device cuda:4 --cohort calib \
+  --output-dir data/analysis/v3b_quant_calib_v1
+```
+
+六条 Calib 完成后保存配置和仅使用主检查点的 Head 画像。
+Validation 使用相同参数，改为 `--cohort validation`，添加
+`--calib-dir data/analysis/v3b_quant_calib_v1`，并换一个新的 `--output-dir`。
+两阶段分开运行；Validation 在 Calib 不完整或冻结配置不一致时拒绝启动。
+固定样本/层/位宽不可从 CLI 改写，`--block-rows` 仅控制分块大小，默认 1024。
+
+可单独运行本轮 CPU 正确性测试，无需下载模型：
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m pytest \
+  experiments/head_analysis/tests/test_quantization_replay.py -q
+```
 
 ## 测试
 

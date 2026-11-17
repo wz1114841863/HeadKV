@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import torch
 import transformers
@@ -109,8 +109,14 @@ def teacher_forced_replay(
     collector: B2AttentionCollector | None = None,
     require_top1_match: bool = True,
     capture_logits: bool = False,
+    before_decode: Callable[[int, Any], None] | None = None,
 ) -> TeacherForcedReplayResult:
-    """Execute Prompt Prefill plus ``G_out - 1`` forced Decode forwards."""
+    """Execute Prompt Prefill plus ``G_out - 1`` forced Decode forwards.
+
+    An optional checkpoint callback receives (step, cache) before a Decode
+    Forward. It must restore that Cache before returning; the main trajectory
+    and its Top-1 checks remain unchanged.
+    """
 
     device = torch.device(device)
     prompt = tuple(int(value) for value in prompt_ids)
@@ -169,6 +175,8 @@ def teacher_forced_replay(
             predictions: list[int] = []
             for step, input_token in enumerate(replay[:-1]):
                 position = len(prompt) + step
+                if before_decode is not None:
+                    before_decode(step, cache)
                 outputs = model(
                     input_ids=torch.tensor([[input_token]], dtype=torch.long, device=device),
                     past_key_values=cache,

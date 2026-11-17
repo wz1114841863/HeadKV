@@ -160,8 +160,8 @@ def _cohorts(samples):
     return result
 
 
-def load_profiles(bundle: Path, feature_specs=FEATURE_SPECS):
-    """Read published features with their sample and physical Head coordinates."""
+def load_profiles(bundle: Path, feature_specs=FEATURE_SPECS, *, coordinate_key="kv_head_ids"):
+    """Read published features with their sample, Layer and Head/Head-pair axes."""
     bundle = Path(bundle)
     source = read_json(bundle / "summary.json")
     samples = source["samples"]
@@ -175,14 +175,14 @@ def load_profiles(bundle: Path, feature_specs=FEATURE_SPECS):
     for sample in samples:
         with np.load(bundle / sample["numeric_file"], allow_pickle=False) as arrays:
             if layers is None:
-                layers, heads = arrays["layer_ids"].copy(), arrays["kv_head_ids"].copy()
-            elif not (np.array_equal(layers, arrays["layer_ids"]) and np.array_equal(heads, arrays["kv_head_ids"])):
-                raise ValueError("Layer/KV Head coordinates differ across samples")
+                layers, heads = arrays["layer_ids"].copy(), arrays[coordinate_key].copy()
+            elif not (np.array_equal(layers, arrays["layer_ids"]) and np.array_equal(heads, arrays[coordinate_key])):
+                raise ValueError("Layer/Head coordinates differ across samples")
             values.append(np.stack([arrays[key] if index is None else arrays[key][..., index]
                                     for _, key, index in feature_specs]).astype(np.float64))
     profiles = np.stack(values, axis=1)
     if profiles.shape[2:] != (len(layers), len(heads)):
-        raise ValueError("feature arrays differ from their Layer/KV Head coordinates")
+        raise ValueError("feature arrays differ from their Layer/Head coordinates")
     return source, profiles, layers, heads
 
 
