@@ -369,7 +369,7 @@ r128 只作数值检查,不参与候选选择;具体范围见 V3 报告第 18 �
 ## Head 级量化敏感性
 
 [V3 第 21 节](../../docs/research/v3_head_aware_kv_optimization.md#21-v3-b-小规模方案全-token-dense-下的-head-级量化敏感性已批准)
-的量化、单 Head 干预、全 Head 局部统计及落盘链路已完成小模型验证；六条正式 Calib 已启动，
+的量化、单 Head 干预、全 Head 局部统计及落盘链路已完成小模型验证；六条正式 Calib 已执行结束、待结果核验，
 运行目录与观察方式见 V3 报告第 21.10 节，Validation 尚未运行。
 `runtime/kv_quantization.py` 提供 K/V 分开的 4/8 bit 编码、实际打包/恢复与布局字节账本；
 `runtime/head_intervention.py` 仅替换目标 Attention 输入副本，不改原 Cache 或只读 Probe。
