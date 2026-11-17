@@ -369,7 +369,8 @@ r128 只作数值检查,不参与候选选择;具体范围见 V3 报告第 18 �
 ## Head 级量化敏感性
 
 [V3 第 21 节](../../docs/research/v3_head_aware_kv_optimization.md#21-v3-b-小规模方案全-token-dense-下的-head-级量化敏感性已批准)
-的量化、单 Head 干预、全 Head 局部统计及落盘链路已完成小模型验证，尚未启动真实模型实验。
+的量化、单 Head 干预、全 Head 局部统计及落盘链路已完成小模型验证；六条正式 Calib 已启动，
+运行目录与观察方式见 V3 报告第 21.10 节，Validation 尚未运行。
 `runtime/kv_quantization.py` 提供 K/V 分开的 4/8 bit 编码、实际打包/恢复与布局字节账本；
 `runtime/head_intervention.py` 仅替换目标 Attention 输入副本，不改原 Cache 或只读 Probe。
 `runners/quantization_runner.py` 的 `replay_quantization_checkpoints` 接受原 Prompt/生成 ID，
@@ -383,7 +384,7 @@ r128 只作数值检查,不参与候选选择;具体范围见 V3 报告第 18 �
 目前仅支持标准非 offload DynamicCache。
 量化布局预算与旁路研究进程的实际显存分开；恢复引用不代表 Cache 追加没有分配开销。
 
-正式运行入口如下，模型权重须已在本机；这是命令示例，本轮尚未运行正式数据：
+正式运行入口如下，模型权重须已在本机；重复运行请换新输出目录：
 
 ```bash
 .venv/bin/python -m experiments.head_analysis.scripts.run_quantization_sensitivity \
