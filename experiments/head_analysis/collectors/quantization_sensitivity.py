@@ -32,12 +32,26 @@ class LocalQuantizationRecord:
 
 class QuantizationSensitivityCollector:
     def __init__(
-        self, prompt_length: int, on_record: Callable[[LocalQuantizationRecord], None], block_rows: int = 1024
+        self,
+        prompt_length: int,
+        on_record: Callable[[LocalQuantizationRecord], None],
+        block_rows: int = 1024,
+        *,
+        bit_widths=BIT_WIDTHS,
+        heads=None,
     ):
         self.prompt_length = prompt_length
         self.start, self.end = quantized_prompt_range(prompt_length)
         self.on_record = on_record
         self.block_rows = block_rows
+        self.bit_widths = tuple(bit_widths)
+        self.heads = None if heads is None else tuple(heads)
+        if (
+            not self.bit_widths
+            or len(set(self.bit_widths)) != len(self.bit_widths)
+            or not set(self.bit_widths) <= {4, 6, 8}
+        ):
+            raise ValueError("local statistics require distinct 4/6/8-bit widths")
 
     def on_attention(self, context: AttentionProbeContext) -> None:
         self.on_record(self.collect(context))
@@ -62,7 +76,10 @@ class QuantizationSensitivityCollector:
         if query_heads % kv_heads or context.key.shape != context.value.shape:
             raise ValueError("invalid GQA or mismatched K/V shape")
         group = query_heads // kv_heads
-        shape = (len(SIDES), len(BIT_WIDTHS), kv_heads)
+        heads = tuple(range(kv_heads)) if self.heads is None else self.heads
+        if not heads or len(set(heads)) != len(heads) or any(h < 0 or h >= kv_heads for h in heads):
+            raise ValueError("local statistic Heads must be distinct coordinates inside the model")
+        shape = (len(SIDES), len(self.bit_widths), len(heads))
         scalar_fields = (
             "representation_squared_error",
             "representation_fp32_squared_error",
@@ -85,10 +102,10 @@ class QuantizationSensitivityCollector:
         for name in ("code_bytes", "statistic_bytes"):
             arrays[name] = np.empty(shape, np.uint64)
         arrays["attention_kl_is_roundoff"] = np.empty((*shape, group), bool)
-        arrays["formula_sdpa_squared_error"] = np.empty((kv_heads, group), np.float64)
-        arrays["formula_sdpa_reference_energy"] = np.empty((kv_heads, group), np.float64)
+        arrays["formula_sdpa_squared_error"] = np.empty((len(heads), group), np.float64)
+        arrays["formula_sdpa_reference_energy"] = np.empty((len(heads), group), np.float64)
         scale = context.scaling if context.scaling is not None else context.key.shape[-1] ** -0.5
-        for head in range(kv_heads):
+        for head_index, head in enumerate(heads):
             q_raw = context.query[:, head * group : (head + 1) * group]
             k_raw, v_raw = context.key[0, head], context.value[0, head]
             q, key, value = q_raw[0, :, 0].float(), k_raw.float(), v_raw.float()
@@ -99,14 +116,14 @@ class QuantizationSensitivityCollector:
             sdpa_output = F.scaled_dot_product_attention(
                 q_raw, k_raw[None, None], v_raw[None, None], is_causal=False, enable_gqa=True, scale=scale
             )[0, :, 0]
-            arrays["formula_sdpa_squared_error"][head] = (
+            arrays["formula_sdpa_squared_error"][head_index] = (
                 (sdpa_output.double() - reference_output.double()).square().sum(-1).cpu().numpy()
             )
-            arrays["formula_sdpa_reference_energy"][head] = energy.cpu().numpy()
+            arrays["formula_sdpa_reference_energy"][head_index] = energy.cpu().numpy()
             for si, side in enumerate(SIDES):
                 original = k_raw if side == "key" else v_raw
-                for bi, bits in enumerate(BIT_WIDTHS):
-                    index = (si, bi, head)
+                for bi, bits in enumerate(self.bit_widths):
+                    index = (si, bi, head_index)
                     restored, encoded, errors = quantize_and_restore(
                         original[self.start : self.end], side, bits, self.block_rows
                     )

@@ -1,6 +1,6 @@
 """Isolated single-Forward quantization branches on the existing fixed replay."""
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 import argparse
@@ -96,7 +96,8 @@ def prediction_errors(reference: torch.Tensor, branch: torch.Tensor, expected_to
     }
 
 
-def run_checkpoint_branches(
+@contextmanager
+def isolated_checkpoint_forward(
     model,
     *,
     cache,
@@ -104,14 +105,10 @@ def run_checkpoint_branches(
     prompt_length: int,
     decode_step: int,
     input_token: int,
-    expected_token: int,
-    targets: Sequence[HeadIntervention],
-    capture_logits: bool = False,
     block_rows: int = 1024,
     sample_id: str = "checkpoint",
-    on_attention: Callable[[AttentionProbeContext], None] | None = None,
-) -> CheckpointResult:
-    """Reuse initialized full DynamicLayer histories; restore references after every branch.
+):
+    """Yield a one-token Forward that restores all DynamicLayer references.
 
     Transformers 5.2 DynamicLayer appends with torch.cat, so its old K/V tensors
     stay immutable. Saving those references avoids copying a complete 32K Cache
@@ -130,7 +127,7 @@ def run_checkpoint_branches(
     inputs = torch.tensor([[input_token]], dtype=torch.long, device=device)
     position = torch.tensor([prompt_length + decode_step], dtype=torch.long, device=device)
 
-    def forward(target):
+    def forward(target=None, *, on_attention=None, **intervention_options):
         try:
             if target is None:
                 observation = (
@@ -152,26 +149,59 @@ def run_checkpoint_branches(
                         logits_to_keep=1,
                     )
                 return _last_token_logits(output), None
-            with single_head_intervention(model, target, prompt_length, block_rows) as state:
+            with single_head_intervention(model, target, prompt_length, block_rows, **intervention_options) as state:
                 output = model(
                     input_ids=inputs, past_key_values=cache, use_cache=True, cache_position=position, logits_to_keep=1
                 )
-            return _last_token_logits(output), state.measurement
+            return _last_token_logits(output), state
         finally:
             for layer, keys, values in history:
                 layer.keys, layer.values = keys, values
 
+    try:
+        with torch.inference_mode():
+            yield forward
+    finally:
+        for layer, keys, values in history:
+            layer.keys, layer.values = keys, values
+
+
+def run_checkpoint_branches(
+    model,
+    *,
+    cache,
+    device,
+    prompt_length: int,
+    decode_step: int,
+    input_token: int,
+    expected_token: int,
+    targets: Sequence[HeadIntervention],
+    capture_logits: bool = False,
+    block_rows: int = 1024,
+    sample_id: str = "checkpoint",
+    on_attention: Callable[[AttentionProbeContext], None] | None = None,
+) -> CheckpointResult:
+    """Normal V3-B branches, sharing the checkpoint lifecycle with D1 controls."""
     results = []
-    with torch.inference_mode():
-        reference, _ = forward(None)
+    with isolated_checkpoint_forward(
+        model,
+        cache=cache,
+        device=device,
+        prompt_length=prompt_length,
+        decode_step=decode_step,
+        input_token=input_token,
+        block_rows=block_rows,
+        sample_id=sample_id,
+    ) as forward:
+        reference, _ = forward(on_attention=on_attention)
         for target in targets:
-            logits, measurement = forward(target)
+            logits, state = forward(target)
             errors = prediction_errors(reference, logits, expected_token)
             results.append(
                 BranchResult(
                     target=target,
                     **errors,
-                    measurement=measurement,
+                    measurement=state.measurement,
                     logits=logits.detach().cpu() if capture_logits else None,
                 )
             )

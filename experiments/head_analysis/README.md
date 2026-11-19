@@ -1,9 +1,8 @@
 # Head Analysis 实验代码
 
-本目录承载 HeadKV 的专用观测、采集和离线分析。B1/B2 正式 100 条采集及离线分析均已
-完成，V2 六条 Pilot 采集及离线分析也已完成核验。目标和进展见[研究总览](../../docs/research/研究总览.md)；
-方法与结果分别见 [B1](../../docs/research/v1_b1_attention_analysis.md)、
-[B2](../../docs/research/v1_b2_prefill_consistency.md) 和 [V2](../../docs/research/v2_kv_representation.md)。本文件只维护代码组织和使用方式。
+本目录承载 HeadKV 的观测、采集、受控回放和离线分析。B1/B2 与 V2 的 100 条采集及分析已完成；V3 已完成表示重建、最小 Dense 存储模拟和量化/同字节组合对照。最新组合 Calib 的 K/V 均未通过第二关，本轮停止，不运行组合 Validation。
+
+目标和状态见[研究总览](../../docs/research/研究总览.md)，方法与结果见 [B1](../../docs/research/v1_b1_attention_analysis.md)、[B2](../../docs/research/v1_b2_prefill_consistency.md)、[V2](../../docs/research/v2_kv_representation.md) 和 [V3-B 阶段小结](../../docs/research/v3_head_aware_kv_optimization.md#v3-b-阶段小结)。本文件维护代码组织、历史命令和结果入口，列出的已完成运行不代表待执行任务。
 
 ## 代码组织
 
@@ -368,9 +367,10 @@ r128 只作数值检查,不参与候选选择;具体范围见 V3 报告第 18 �
 
 ## Head 级量化敏感性
 
-[V3 第 21 节](../../docs/research/v3_head_aware_kv_optimization.md#21-v3-b-小规模方案全-token-dense-下的-head-级量化敏感性已批准)
-的量化、单 Head 干预、全 Head 局部统计及落盘链路已完成小模型验证；六条正式 Calib 已执行结束、待结果核验，
-运行目录与观察方式见 V3 报告第 21.10 节，Validation 尚未运行。
+[V3 第 21 节](../../docs/research/v3_head_aware_kv_optimization.md#v3-b-阶段小结)
+的量化、单 Head 干预、全 Head 局部统计及落盘链路已完成小模型验证；六条正式 Calib 已完成工件和数值一致性核验，
+结果见 V3 报告第 21.11 节：局部 Head 差异明显，最终预测排序尚不稳定。
+六条冻结 Validation 已在 GPU4 完成并核验，输出 `data/analysis/v3b_quant_validation_20261118_v1/`；局部画像保持，最终预测排序未保持，8 bit 非单调仍存在，结果见第 21.13 节。
 `runtime/kv_quantization.py` 提供 K/V 分开的 4/8 bit 编码、实际打包/恢复与布局字节账本；
 `runtime/head_intervention.py` 仅替换目标 Attention 输入副本，不改原 Cache 或只读 Probe。
 `runners/quantization_runner.py` 的 `replay_quantization_checkpoints` 接受原 Prompt/生成 ID，
@@ -407,6 +407,132 @@ Validation 使用相同参数，改为 `--cohort validation`，添加
 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m pytest \
   experiments/head_analysis/tests/test_quantization_replay.py -q
 ```
+
+D1 控制核心见 `runners/quantization_diagnostics.py`。`run_d1_checkpoint` 接受现成的原始
+Cache、当前/下一 Token 与 `HeadIntervention(layer, head, side, None)`，按固定十二次序列
+比较基线、匹配旁路、等值克隆、4/8 bit 换序重复与首次重建值直接注入。
+`replay_d1_checkpoints` 接受原 Prompt/生成 ID 和 `{step: [上述坐标, ...]}`，复用一次
+Prefill 与固定前缀回放；返回 `.baseline` 与 `.checkpoints`，每坐标包含 `.records`、
+`.comparisons`，`capture_logits=True` 可保留 CPU 原生精度 Logits。
+`check_inputs=False` 关闭新增诊断检查/快照，传入的原 `on_attention` Observer 仍在基线生效。
+固定重建的测量复用首次编码信息，`encoding_performed=False` 表示本次未重新编码。
+D1 控制核心已通过完整回归；落盘和 CLI 补充后，本地/远端各 40 项相关测试及远端
+BF16、D=128 GPU 小模型端到端检查通过。真实模型运行状态见 V3 报告第 21.17 节。
+
+固定两条输入的真实模型诊断入口（只运行 D1，输出目录必须不存在）：
+
+```bash
+.venv/bin/python -u -m experiments.head_analysis.scripts.run_quantization_diagnostics \
+  --calib-dir data/analysis/v3b_quant_calib_20261117_v1 \
+  --validation-dir data/analysis/v3b_quant_validation_20261118_v1 \
+  --device cuda:0 --output-dir data/analysis/v3b_quant_diagnostic_20261118_v1/d1
+```
+
+`cuda:0` 对应启动时通过 `CUDA_VISIBLE_DEVICES` 指定的物理 GPU。
+入口复用原配置、Prompt 和 B1 前缀，保存逐分支记录、原生 Logits 的精确 FP32 转存、
+输入检查开/关比较及资源统计。GovReport 主坐标的原 KL/Top-1 未精确复现时，
+仅触发一次预定的原顺序回放；这只是保守触发规则，不是质量阈值。
+
+D2 的 `collectors/quantization_diagnostics.py` 在同一检查点分支上捕获真实 `o_proj`
+输入/输出、目标及后续层输出、最终 Norm、`lm_head` 输入/输出，记录逐阶段 SSE、
+参考能量、NMSE 和最大差，并区分目标 Query Head 组与其余组。
+API 增加 `capture_propagation=True`，默认关闭；须保留 `check_inputs=True`。
+逐分支记录位于 `.records[i]["propagation"]`，`.propagation.projection` 是 FP32
+投影对照，`.propagation.arrays` 是紧凑数组。
+
+CLI 增加 `--capture-propagation` 即启用 D2，须另选尚不存在的输出目录，不能使用已完成的
+`d1/`。十二分支序列和 Forward 数不变；关闭检查的匹配序列也关闭 D2 hooks，保留原 Observer。
+每个带检查坐标额外写 `*_checked_propagation.npz`：保存 B0/Q4/Q8 的最终隐藏向量、
+真实 Attention 输出、原设备 FP32/CPU FP64 公式输出及 FP32 重投影 Logits；逐层追踪和
+原生/FP32 的并列数、Top-1 间隔、KL64 位于同名 JSON。Q/K/V 只暂存选中 Head，计算后释放。
+FP32 投影用原隐藏值和原权重分块重算，单独禁用 autocast/TF32 并恢复设置，
+各分支相对其 FP32 基线比较；原 KL32 不变。已通过本地完整回归、远端 48 项相关测试和
+CUDA 小模型验证；GPU4 的两条真实 D2 已完成工件和数值核验，输出已下载至本地同路径
+`data/analysis/v3b_quant_diagnostic_20261118_v1/d2/`。运行记录和诊断结果见 V3 第 21.18～21.19 节；
+原 D1 结果保留，FP32 参照不替换原指标。
+
+## 同字节 Head 位宽分配
+
+入口 `scripts/run_head_budget.py` 复用原量化、固定回放和 FP32 最终投影。
+K/V 各比较统一 6 bit、Calib 拟合的每层半数 4/8 bit，以及固定循环错位一位的身份对照。
+每个方案都计入实际码流、FP32 统计、另一侧 BF16、保护/残余/Decode、模型位图和头部对齐。
+原 4/8 bit 行为及旧指标保持不变；新增 6 bit 是质量/存储对照，不表示已有高效压缩 Attention 内核。
+
+本地已完成下面的拟合，复用现有目录即可；重新拟合须换新目录：
+
+```bash
+.venv/bin/python -m experiments.head_analysis.scripts.run_head_budget fit \
+  --source-calib-dir data/analysis/v3b_quant_calib_20261117_v1 \
+  --output-dir data/analysis/v3b_head_budget_20261118_v1/allocation
+```
+
+完整模型 Calib 已在 GPU4、`zsy_2:head_budget_calib` 运行结束，原命令如下；该输出目录已使用，
+不要重复启动覆盖，重跑须换新目录：
+
+```bash
+CUDA_VISIBLE_DEVICES=GPU-e8df4311-a158-0d38-d2de-0c096b18fd47 \
+.venv/bin/python -u -m experiments.head_analysis.scripts.run_head_budget run \
+  --allocation-dir data/analysis/v3b_head_budget_20261118_v1/allocation \
+  --cohort calib --device cuda:0 \
+  --output-dir data/analysis/v3b_head_budget_20261118_v1/calib
+```
+
+该半 4/8 组合没有稳定的同预算收益，本轮不运行其 Validation。历史 `run` 接口保留
+`--cohort validation --calib-dir <已完成Calib目录>`，并要求方案/配置一致，但不作为本轮
+下一步。模型路径和固定样本来自原配置，已有输出目录不覆盖。
+该参数目录属于忽略的 `data/`，后续远端运行时需同步此冻结目录；只有代码同步不包含它。
+
+每输入一次 Prefill，沿既定点位执行 Dense+六种组合；每点 JSON 保存预测、并列边界、
+字节账本和投影设置，NPZ 保存七个原生/重投影词表向量、最终隐藏向量、位宽及逐 Head 重建误差。
+汇总先平均输入内点位、再对条件等权，保留逐输入结果，报告 Head-aware 相对统一/错位的差值。
+已通过远端 61 项相关测试及 BF16、D=128 CUDA 小模型检查。真实 Calib 已运行结束，日志/退出码
+为同级 `calib.log/calib.exitcode`，已记录 `HEAD_BUDGET_CALIB_EXIT=0`；窗口退出后保留。
+六条 Calib、10 个检查点已完成来源、数组、独立 Logits 指标与完整字节账本核验；原数值包
+也已拉至本地同名目录。FP32 最终投影对照下，差异化 K/V 平均 KL 比统一 6 bit 高
+55.14%/110.86%，当前规则未体现稳定的同预算收益。结果及数值口径见 V3 第 21.21 节。
+Validation 尚未启动；若继续，须复用现有冻结方案，不能据本次结果调参后称同一验证。
+
+第一关诊断复用旧 4/8 bit 包，仅新增六条 Calib 主点的 6 bit 局部统计及 H0 衔接锚点，
+拟合每层至多一对 4/8 bit、其余 6 bit 的固定分配，并计算逐输入局部 Oracle：
+
+```bash
+CUDA_VISIBLE_DEVICES=GPU-e8df4311-a158-0d38-d2de-0c096b18fd47 \
+.venv/bin/python -u -m experiments.head_analysis.scripts.run_head_budget diagnose-local \
+  --source-calib-dir data/analysis/v3b_quant_calib_20261117_v1 \
+  --allocation-dir data/analysis/v3b_head_budget_20261118_v1/allocation \
+  --device cuda:0 \
+  --output-dir data/analysis/v3b_budget_diagnostic_20261118_v1
+```
+
+新目录下 `samples/` 保存每条的 `local6.npz`、`anchor48.npz`、回放和资源信息，
+`analysis.npz`/`summary.json` 保存固定/Oracle 与旧方案的比较和第一关判读，`allocation/`
+保存固定表及可读取的二进制描述符。阈值沿 V3 第 21.22 节冻结，命令不自动启动第二关、
+Validation 或 Test。只做第一关相关 CPU 测试可运行 `tests/test_local_budget_gate.py`。
+该目录已在 GPU4、`zsy_2:budget_gate1` 完成并核验，不要重复覆盖；同级 `.log/.exitcode`
+保存进度和返回码，已记录 `V3B_LOCAL_GATE_EXIT=0`，退出后窗口保留。启动前本地
+356 项回归、远端 70 项相关测试及 BF16、D=128、GQA CUDA 小模型检查均通过。
+六条 Calib 的 K/V 固定局部 J 分别改善 62.14%/32.09%，均通过第一关；新数值包已拉至
+本地同名目录，详见 V3 第 21.24 节。第二关 Calib 的执行与结果见下，组合 Validation 和 Test 未启动。
+
+第二关六条 Calib 的组合回放入口读取上面的冻结 F，生成固定 +1 错位，K/V 分开；
+每点保留 Dense 前后对照及两种 Logits 路径，不重新拟合，不衔接 Validation：
+
+```bash
+CUDA_VISIBLE_DEVICES=GPU-e8df4311-a158-0d38-d2de-0c096b18fd47 \
+.venv/bin/python -u -m experiments.head_analysis.scripts.run_head_budget replay-pairs \
+  --local-gate-dir data/analysis/v3b_budget_diagnostic_20261118_v1 \
+  --device cuda:0 \
+  --output-dir data/analysis/v3b_budget_gate2_20261119_v1/calib
+```
+
+新目录 `allocation/` 保留实际采用的六份描述符，`samples/` 保存十个点的 JSON/NPZ、
+回放及资源信息；`summary.json` 保留逐输入/总体/主点/晚期汇总、实测数值背景和逐侧
+第二关判读。运行/核验记录见 V3 第 21.25 节，不能将其解释为持续压缩或部署性能实测。
+该目录已在 GPU4、`zsy_2:budget_gate2_calib` 完成并核验，不要覆盖。日志/退出码位于
+同级 `calib.log/calib.exitcode`，已记录 `V3B_GATE2_CALIB_EXIT=0`，窗口保留；六条 48 个
+工件及日志已拉至本地同名目录。K/V 均未通过第二关，按冻结方案停止，不运行组合
+Validation。详见 V3 第 21.25 节的结果段。启动前完整本地 366 项回归、远端 80 项相关
+测试及 BF16、D=128、GQA CUDA 小模型检查通过。
 
 ## 测试
 

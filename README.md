@@ -1,18 +1,19 @@
 # HeadKV
 
-HeadKV 是一个面向大语言模型 KV Cache 的研究项目，主要研究不同 Attention Head 的访问行为和潜在规律。项目基于 KV-Base，技术来源为 NVIDIA KVPress → KV-Base → HeadKV。
+HeadKV 是一个面向大语言模型 KV Cache 的研究项目，研究不同 KV Head 的 Attention 访问行为、K/V 表示结构及这些差异的可利用性。项目基于 KV-Base，技术来源为 NVIDIA KVPress → KV-Base → HeadKV。
 
-当前研究关注三个问题：不同 Head 的行为有何差异；这些差异在时间、输入和任务之间是否稳定；Prefill 阶段的特征与后续 Decode 行为之间是否存在关联。
+研究从 Head 行为与表示差异的发现，推进到这些差异能否转化为质量可接受的 KV 编码、存储和搬运收益，最终面向边缘 NPU/ASIC。
 
 ## 当前进展
 
-- **数据准备**：构建并验证 100 条固定输入，覆盖 RULER、GovReport 和 PG19 的六个数据集与长度条件。
-- **V1-B1：Attention 分布与时间行为**：完成相同输入上的 Attention 统计、Token/Page 时间稳定性和跨条件分析。
-- **V1-B2：Prefill 一致性与跨阶段关系**：回放 B1 生成轨迹，分析 Prefill 频次集中度、Decode 覆盖及其与时间稳定性的关系。
+- **数据准备**：100 条固定输入，覆盖 RULER、GovReport 和 PG19 的六个任务与长度条件。
+- **V1-B1/B2**：完成 Attention 分布、Token/Page 时间稳定性、Prefill 一致性及跨阶段关系分析。
+- **V2**：完成 100 条 K/V 表示采集及跨输入分析，支持 Head 表示、RoPE 响应和跨 Head 关系存在可复现结构。
+- **V3**：完成固定 PCA/Pre-RoPE 重建、Head 预算与共享、Dense 存储模拟，以及量化敏感性和同字节组合对照。局部误差可以优化，但最新组合 Calib 的 K/V 均未通过冻结门槛，该轮停止，不运行组合 Validation。
 
-现有结果表明，在当前模型和输入条件下，Head 的时间行为存在差异，部分 Prefill 特征与 Decode 稳定性相关。这些发现仍限于当前模型、输入和生成轨迹；项目尚未完成跨模型验证、因果干预或压缩质量与系统效率评估。
+已有证据支持 Head 异质性及局部画像的用途；尚无可靠的同预算组合预测优势、持续压缩任务质量或实际系统收益证据。结果限于当前模型和输入，未完成跨模型验证。
 
-研究目标、实验设置和阶段结论见[研究总览](docs/research/研究总览.md)；具体方法、数据和结果见[数据准备](docs/research/data_preparation.md)、[B1 报告](docs/research/v1_b1_attention_analysis.md)和 [B2 报告](docs/research/v1_b2_prefill_consistency.md)。
+研究主线、状态和报告入口见[研究总览](docs/research/研究总览.md)；当前阶段的集中结论见 [V3-B 阶段小结](docs/research/v3_head_aware_kv_optimization.md#v3-b-阶段小结)。各阶段的方法、数值和限制保留在对应报告中。
 
 ## 项目结构
 
